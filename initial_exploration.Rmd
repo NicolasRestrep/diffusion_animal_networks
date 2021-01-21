@@ -1,0 +1,367 @@
+---
+title: "First Report"
+subtitle: "Network descriptives and initial simulations"
+author: "Nicolas Restrepo"
+date: "1/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction 
+
+This is going to be a simple report. I am going to build the networks, visualize them, and outline some of their general features. Then, I am going to try out some initial analyses on some of the static networks. The main goal is to see how the networks' capacity to transmit culture changes as we remove nodes. Here, I will use random removal and will examine how this affects two things: the global efficiency of the network and how quickly information diffuses across it. I am going to keep all the code visible so that everything I do is transparent.  
+
+## Building the Networks 
+
+## Elephant Data 
+
+I am going to begin looking at the elephant data. We have three networks represented through association matrices. However, the matrices reflect distance and, thus, 1 signals that the elephants were never close, while 0 denotes maximum association. 
+
+Let's begin by loading the data and building a network from it. 
+
+```{r, message=FALSE, warning=FALSE}
+# Packages 
+library(tidyverse)
+library(igraph)
+library(patchwork)
+```
+
+```{r}
+# Import the data 
+elephant_data <- read_csv("Data/dist.matrix.t1.csv")
+# Transform data into square matrix
+elephant_matrix <- elephant_data %>% 
+  select(2:ncol(elephant_data)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data)[2:ncol(elephant_data)]
+colnames(elephant_matrix) <- node_IDs
+rownames(elephant_matrix) <- node_IDs
+```
+
+Given that we have an "inverse" association matrix, we need to do some algebra to create the network. What I am going to do is create a matrix of equal dimensions populated with 1s and then I will subtract our elephant matrix from it. 
+
+```{r}
+# Build inverse matrix
+inv_elephant_matrix <- matrix(1, 97, 97) - elephant_matrix
+
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix) <- 0
+
+# Now create the network
+elephant_graph_inv <- 
+graph_from_adjacency_matrix(inv_elephant_matrix, mode = "undirected", weighted = T)
+
+# Let's see the first three nodes 
+inv_elephant_matrix[1:3,1:3]
+
+```
+
+Here's an example of our matrix. We notice pretty strong associations between the first three elephants. Let's look at some descriptive features of our network. 
+
+```{r}
+# Get the degree distribution of the graph
+tibble(degree = degree(elephant_graph_inv)) %>% 
+  ggplot(aes(x = degree)) +
+  geom_histogram(bins = 50) +
+  theme_bw() +
+  labs(y = "", 
+       title = "Degree Distribution")
+
+# Get the distribution of weights
+tibble(weight = E(elephant_graph_inv)$weight) %>% 
+  ggplot(aes(x = weight)) +
+  geom_histogram(bins = 50) +
+  theme_bw() +
+  labs(y = "", 
+       title = "Weight Distribution")
+```
+The degree distribution is centered around relatively high values, meaning that most agents have at least some association to the others. But the distribution of weights shows that the bulk of those associations are tenuous. The strong associations we saw above are very much the exception and not the rule. 
+
+Now, I am going to plot the network. I'll present the network as is but I will also impose a threshold on what constitutes a tie. The second plot will represent the network if we only count the associations that are bigger than the average weight. Additionally, we have information about kinship ties in our matrix. I'll incorporate that into our visualizations: red edges will represent kinship ties. 
+
+
+```{r}
+# Write a function for plotting 
+# It accepts three arguments m = matrix, t = threshold, c = caption
+
+plot_with_threshold <-  function(m, t, c) {
+  # Copy of our matrix 
+  copy_mat <- m 
+  # Replace values below threshold with 0
+  copy_mat[copy_mat < t] <- 0
+  # Now create the network
+  graph <- 
+  graph_from_adjacency_matrix(copy_mat, mode = "undirected", weighted = T)
+
+# Build an edgelist to find family ties
+edgelist <- get.data.frame(graph)
+
+# See which lines fullfil the requirements for kinship ties
+kinship_ties <- rep(NA, nrow(edgelist))
+
+for (i in 1:nrow(edgelist)) {
+  pat_from <- edgelist$from[i]
+  if (str_detect(edgelist$to[i], "\\.") != TRUE) {
+    kinship_ties[i] <- 0
+  } else {
+    pat_to <- sub("\\..*", "", edgelist$to[i])
+    if (pat_from==pat_to) {
+      kinship_ties[i] <- 1
+    } else {
+      kinship_ties[i] <- 0
+    }
+  }
+}
+
+edgelist$kinship <- kinship_ties
+
+# Color by family tie 
+E(graph)$color <- ifelse(kinship_ties==1, "red", "grey")
+
+plot(graph, layout = layout.fruchterman.reingold, 
+     vertex.label = "", vertex.size = 2, vertex.color = "white", edge.width = E(graph)$weight, main = paste0(c, "\n", "Threshold = ", t))
+}
+
+plot_with_threshold(m = inv_elephant_matrix, t = 0,
+                    c = "Elephants Wave 1")
+plot_with_threshold(m = inv_elephant_matrix, t = round(mean(inv_elephant_matrix), 3),
+                    c = "Elephants Wave 1")
+```
+
+We see a densely connected network that seems to have distinct cliques. When we impose the threshold on what constitutes a tie, we do see more clearly these small clusters. These well-connected cliques, loosely tied to each other, resonates with what we see in other elephant networks. 
+
+Let's inspect the second wave. I am going to produce similar descriptive plots and network visualizations 
+
+```{r}
+# Import the data 
+elephant_data_w2 <- read_csv("Data/dist.matrix.t2.csv")
+# Transform data into square matrix
+elephant_matrix_w2 <- elephant_data_w2 %>% 
+  select(2:ncol(elephant_data_w2)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs_w2 <- names(elephant_data_w2)[2:ncol(elephant_data_w2)]
+colnames(elephant_matrix_w2) <- node_IDs_w2
+rownames(elephant_matrix_w2) <- node_IDs_w2
+
+# Build inverse matrix
+inv_w2<- matrix(1, 130, 130) - elephant_matrix_w2
+# Populate the diagonal with 0s
+diag(inv_w2) <- 0
+
+elephant_graph_w2 <- graph_from_adjacency_matrix(inv_w2, mode = "undirected", weighted = T)
+
+# Get the degree distribution of the graph
+tibble(degree = degree(elephant_graph_w2)) %>% 
+  ggplot(aes(x = degree)) +
+  geom_histogram(bins = 50) +
+  theme_bw() +
+  labs(y = "", 
+       title = "Degree Distribution", 
+       subtitle = "Wave 2")
+
+# Get the distribution of weights
+tibble(weight = E(elephant_graph_w2)$weight) %>% 
+  ggplot(aes(x = weight)) +
+  geom_histogram(bins = 50) +
+  theme_bw() +
+  labs(y = "", 
+       title = "Weight Distribution", 
+       subtitle = "Wave 2")
+
+
+```
+
+We have a degree distribution centered around a higher value but also a longer left tail, meaning there are  quite a few nodes that are not that well connected. Again the distribution of weights suggests most connections are rather weak. 
+
+```{r}
+plot_with_threshold(m = inv_w2, 
+                    t = 0, 
+                    c = "Elephants Wave 2")
+plot_with_threshold(m = inv_w2, 
+                    t = round(mean(inv_w2, na.rm = T), 3), 
+                    c = "Elephants Wave 2")
+
+```
+We see a similar pattern as above: a densely connected network whose cliques become clear when we impose some threshold on the ties. This network, however, is more densely connected than the one from the first wave.  
+
+Let's finish this initial exploration with wave 3. 
+
+```{r}
+# Read in the data 
+elephant_data_w3 <- read_csv("Data/dist.matrix.t3.csv")
+
+# Transform data into square matrix
+elephant_matrix_w3 <- elephant_data_w3 %>% 
+  select(2:ncol(elephant_data_w3)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs_w3 <- names(elephant_data_w3)[2:ncol(elephant_data_w3)]
+colnames(elephant_matrix_w3) <- node_IDs_w3
+rownames(elephant_matrix_w3) <- node_IDs_w3
+
+# Build inverse matrix
+inv_w3 <- matrix(1, 120, 120) - elephant_matrix_w3
+# Populate the diagonal with 0s
+diag(inv_w3) <- 0
+
+elephant_graph_w3 <- graph_from_adjacency_matrix(inv_w3, mode = "undirected", weighted = T)
+
+# Get the degree distribution of the graph
+tibble(degree = degree(elephant_graph_w3)) %>% 
+  ggplot(aes(x = degree)) +
+  geom_histogram(bins = 50) +
+  theme_bw() +
+  labs(y = "", 
+       title = "Degree Distribution", 
+       subtitle = "Wave 3")
+
+# Get the distribution of weights
+tibble(weight = E(elephant_graph_w3)$weight) %>% 
+  ggplot(aes(x = weight)) +
+  geom_histogram(bins = 50) +
+  theme_bw() +
+  labs(y = "", 
+       title = "Weight Distribution", 
+       subtitle = "Wave 3")
+
+```
+A similar pattern: a densely connected networks with mostly weak ties. 
+
+We can visualize the network in the same way we have been doing so far. 
+
+```{r}
+plot_with_threshold(m = inv_w3, 
+                    t = 0, 
+                    c = "Elephants Wave 3")
+plot_with_threshold(m = inv_w3, 
+                    t = round(mean(inv_w3, na.rm = T), 3), 
+                    c = "Elephants Wave 3")
+```
+We see a similar structure than the one for wave 2 but it seems to be even more densely connected. We notice a higher proportion of relatively strong ties when we impose the threshold. 
+
+### Dolphin Data
+
+Now, I am going to look at the dolphin data. I am going to do the same for the networks we have here. We still have association indices here but in the form of an edgelist. This will make the creation of the networks a bit more straightforward. We also have a relatedness coefficient here that I want to work into the visualizations. Ties that have above average relatedness will be colored red.
+
+```{r}
+# Import the data
+dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
+
+# Function to plot the networks 
+plot_edgelist <- function(w, t) {
+# Conditional statements for the waves 
+if (w == 1) {
+  c <- "T2008"
+  title <- "Wave 1"
+} else {
+  if(w ==2) {
+    c <- "T2010"
+    title <- "Wave 2"
+  } else {
+    if (w==3) {
+      c <- "T2012"
+      title <- "Wave 3"
+    } else {
+      if (w == 4) {
+        c <- "T2014"
+        title <- "Wave 4"
+      } else {
+        if (w == 5) {
+          c <- "T2016"
+          title <- "Wave 5"
+        } else {
+          c <- "T2018"
+          title <- "Wave 6"
+        }
+      }
+    }
+  }
+}
+  # Take the wave 
+  edgelist <- dolphin_edge_lists %>% 
+    select(1,2, c, 9) %>% 
+    filter(!is.na(.[,3]) & .[,3] > t) %>% 
+    rename(weight = c, 
+           from = ID1, 
+           to = ID2)
+  
+net <- graph_from_data_frame(edgelist, directed = FALSE)
+E(net)$color <- ifelse(edgelist$relatedness_coef >= mean(edgelist$relatedness_coef, na.rm = T),
+                       "red", "grey")
+plot(net, layout = layout.fruchterman.reingold, 
+     vertex.label = "", 
+     vertex.size = 3, 
+     vertex.color = "white", edge.width = E(net)$weight, 
+     main = paste0("Dolphins - ", title, "\n", "Threshold = ", t))
+}
+
+```
+
+We are ready to start plotting. We have six networks here so I'm going to keep it short. I'll plot them all using a threshold of 0.05. 
+
+```{r, warning = F}
+walk(c(1:6), plot_edgelist, t = 0.05)
+```
+
+In most waves, we notice one main component consisting of individuals who are quite related to one another. Another subgraph of unrelated individuals at times consolidates, like in wave 2 and 3. However, there are times when we do not clearly see another connected clique, like in waves 4 or 6. 
+
+## Efficiency and Random Removal
+
+One way of looking at a network's capacity for information transmission is by looking at its efficiency. Latora and Marchiori define the efficiency in communication between to nodes i and j as inversely proportional to the distance between them. 
+
+$$ Efficiency_{ij} = \frac{1}{d_{ij}}$$
+The average efficiency of a network G is the sum of all the inverse distances between each pair of nodes. The measure of efficiency is normalized so that:
+
+$$ 0 \leq E(G) \leq 1$$
+In this section, then, I will do the following: 
+
+1) I will choose two specific networks, one for elephants and one for dolphins. 
+
+2) I will calculate the global efficiency of the networks. 
+
+3) I will remove one node at a time - up to five - and will calculate a range of efficiency scores after each random removal. 
+
+I will work with wave 2 of both the elephant and dolphin data. Ties will only count if the edge weight is above or equal to the median edge weight in the association matrix. Let's visualize the networks for clarity. 
+
+```{r}
+# Create the backboned elephant network 
+enet <- inv_w2
+# Replace values below threshold with 0
+enet[enet <= median(enet, na.rm = T)] <- 0
+# Now create the network
+elephant_graph <- 
+  graph_from_adjacency_matrix(enet, mode = "undirected", weighted = T)
+
+# Plot for clarity 
+plot_with_threshold(m = inv_w2, 
+                    t = round(mean(inv_w2, na.rm = T), 3), 
+                    c = "Elephants - Wave 2")
+
+# Now create the dolphin network 
+# Take the wave 2 data 
+  edgelist <- dolphin_edge_lists %>% 
+    select(1,2, T2010, 9) %>% 
+    filter(!is.na(T2010) & T2010 >= mean(T2010, na.rm = TRUE)) %>% 
+    rename(weight = T2010, 
+           from = ID1, 
+           to = ID2)
+  
+dolphin_net <- graph_from_data_frame(edgelist, directed = FALSE)
+
+average <- median(edgelist$weight, na.rm = T) %>% round(3)
+
+plot_edgelist(w = 2, 
+              t = average)
+```
+
+Now that we have the networks, we can begin to examine how random removal might affect the global efficiency. 
+
+```{r}
+
+```
+
