@@ -27,6 +27,8 @@ Let's begin by loading the data and building a network from it.
 library(tidyverse)
 library(igraph)
 library(patchwork)
+library(brainGraph)
+library(bayestestR)
 ```
 
 ```{r}
@@ -324,7 +326,7 @@ In this section, then, I will do the following:
 
 2) I will calculate the global efficiency of the networks. 
 
-3) I will remove one node at a time - up to five - and will calculate a range of efficiency scores after each random removal. 
+3) I will remove one node at a time - up to twenty - and will calculate a range of efficiency scores after each random removal. 
 
 I will work with wave 2 of both the elephant and dolphin data. Ties will only count if the edge weight is above or equal to the median edge weight in the association matrix. Let's visualize the networks for clarity. 
 
@@ -362,6 +364,351 @@ plot_edgelist(w = 2,
 Now that we have the networks, we can begin to examine how random removal might affect the global efficiency. 
 
 ```{r}
+# Write a function to explore random removal
+efficiency_after_random_removal <- function(g, reps, num_removals) {
+  # placeholder 
+  efficiencies <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    rmv <- sample(1:vcount(g), num_removals)
+    ng <- delete.vertices(g,rmv)
+    eff <- efficiency(ng, type = "global", weights = E(ng)$weight)
+    efficiencies[i] <- eff
+  }
+  avg_eff <- mean(efficiencies)
+  sd_eff <- sd(efficiencies)
+  upper <- avg_eff + 1.96*sd_eff
+  lower <- avg_eff - 1.96*sd_eff
+  return(c(avg_eff = avg_eff, 
+           upper = upper, 
+           lower = lower, 
+           removals = num_removals))
+}
+
+# Random removal dataframes
+dolphin_rr_df <- map_df(c(1:20), 
+                    efficiency_after_random_removal, 
+                        g=dolphin_net, 
+                        reps = 100)
+elephant_rr_df <- map_df(c(1:20), 
+                    efficiency_after_random_removal, 
+                        g=elephant_graph, 
+                        reps = 100)
+
+# Add a column for the animal and then bind them
+dolphin_rr_df$network <- "dolphin"
+elephant_rr_df$network <- "elephant"
+removal_df <- rbind(dolphin_rr_df, elephant_rr_df)
+
+removal_df %>% 
+  ggplot(aes(x = removals, y = avg_eff)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + 
+  geom_line(color = "gray") +
+  facet_wrap(~network) + 
+  theme_bw() + 
+  labs(title = "Global efficiency after random removal", 
+       x = "Efficiency", 
+       y = "Removals")
 
 ```
 
+We notice that the efficiency of these networks seems quite robust to random removal, at least up to 20 nodes. We do notice that the variance in efficiencies expands quite a bit. It seems that removing certain nodes does have an effect but that - understandably - does not change the central tendency here. 
+
+I am going to do the same procedure but removing the most central nodes, one at a time. Maybe this will have a bigger effect. 
+
+```{r}
+# Write a function for removal of central nodes
+efficiency_after_centrality_removal <- function(g, reps, num_removals) {
+  # placeholder 
+  efficiencies <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    centrality <- eigen_centrality(g)$vector 
+    centrality <- sort(centrality, decreasing = T) 
+    central_nodes <- names(centrality)
+    ng <- delete.vertices(g,central_nodes[1:num_removals])
+    eff <- efficiency(ng, type = "global", weights = E(ng)$weight)
+    efficiencies[i] <- eff
+  }
+  avg_eff <- mean(efficiencies)
+  sd_eff <- sd(efficiencies)
+  upper <- avg_eff + 1.96*sd_eff
+  lower <- avg_eff - 1.96*sd_eff
+  return(c(avg_eff = avg_eff, 
+           upper = upper, 
+           lower = lower, 
+           removals = num_removals))
+}
+
+
+# Random removal dataframes
+dolphin_rr_df <- map_df(c(1:20), 
+                    efficiency_after_centrality_removal, 
+                        g=dolphin_net, 
+                        reps = 100)
+elephant_rr_df <- map_df(c(1:20), 
+                    efficiency_after_centrality_removal, 
+                        g=elephant_graph, 
+                        reps = 100)
+
+# Add a column for the animal and then bind them
+dolphin_rr_df$network <- "dolphin"
+elephant_rr_df$network <- "elephant"
+removal_df <- rbind(dolphin_rr_df, elephant_rr_df)
+
+removal_df %>% 
+  ggplot(aes(x = removals, y = avg_eff)) +
+  geom_line(color = "gray") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + 
+  facet_wrap(~network) + 
+  theme_bw() + 
+  labs(title = "Global efficiency after centrality removal", 
+       x = "Efficiency", 
+       y = "Removals")
+
+```
+
+We do notice here a slight decrease in global efficiency. 
+
+## Diffusion Trajectories
+
+I am going to examine now how diffusion trajectories might be affected by random removal. To examine diffusion, I will use a contagion model that allows for both simple and complex contagion. 
+
+```{r}
+
+# Contagion model from Acerbi et al (2020)
+info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+  adjm <- get.adjacency(net, sparse = F)
+  
+  # Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+  # adjm_bool <- adjm > 0
+  
+  # Set number of individuals based adjacency matrix
+  N <- vcount(net)
+  
+  # Create a vector indicating possession of info and set one entry to TRUE
+  info <- rep(FALSE, N)
+  info[sample(x = N, size = 1)] <- TRUE
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      nei <- adjm[i,] > 0
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(info * nei) / length(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+
+```
+
+What I am going to do here is: 
+1) Run contagion model.
+2) Run contagion model with node removal. 
+3) Calculate areas under the curve for both diffusion trajectories.
+4) Find the ratio between these areas. 
+5) Repeat 1 through 4 so we get a distribution of differences of areas under the curve. 
+
+Let's see how that would look like in the elephant network:
+
+```{r}
+set.seed(33)
+# Contagion with no removal
+e_sim_nr <- info_contagion(elephant_graph, 
+                           rewire = F, 
+                           e = 1, 
+                           r_max = 100)
+
+p1 <- e_sim_nr %>% 
+  ggplot(aes(x = time, y = proportion)) +
+  geom_line() + 
+  theme_bw() + 
+  labs(title = "No removal")
+
+# Now some random removal
+rmv <- sample(1:vcount(elephant_graph), 10)
+ng <- delete.vertices(elephant_graph, rmv)
+
+
+# Contagion with no removal
+e_sim_r <- info_contagion(ng, 
+                           rewire = F, 
+                           e = 1, 
+                           r_max = 100)
+
+p2 <- e_sim_r %>% 
+  ggplot(aes(x = time, y = proportion)) +
+  geom_line() + 
+  theme_bw() + 
+  labs(title = "50 nodes removed")
+
+p1 + p2
+
+```
+
+We have very similar trajectories. What happens when we divide the areas under the curve. 
+
+```{r}
+auc_nr <- area_under_curve(x = e_sim_nr$time, 
+                           y = e_sim_nr$proportion)
+auc_r10 <- area_under_curve(x = e_sim_r$time, 
+                           y = e_sim_r$proportion)
+auc_r10/auc_nr
+```
+
+We notice that the area under the curve after removal is slightly smaller after removal. This means that the trajectory reached the maximum a bit quicklier. I will now repeat this process many times to get a distribution of differences. 
+
+```{r}
+# Function to calculate the AUC of multiple runs
+multiple_diff_auc <- function(ev, g, reps, turns, num_removals) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+    auc_nr <- area_under_curve(x = sim$time, 
+                            y = sim$proportion)
+    
+    # Now some random removal
+  rmv <- sample(1:vcount(g), num_removals)
+  ng <- delete.vertices(g, rmv)
+  sim_r <- info_contagion(ng, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+  auc_r <- area_under_curve(x = sim_r$time, 
+                            y = sim_r$proportion)
+  
+  diff <- auc_r/auc_nr
+  
+    values[i] <- diff
+  }
+  return(values)
+}
+
+# Now run 100 
+diffs_10_rems <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph, 
+                  reps = 100, 
+                  turns = 100, 
+                  num_removals = 10)
+
+diffs_20_rems <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph, 
+                  reps = 100, 
+                  turns = 100, 
+                  num_removals = 20)
+diffs_5_rems <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph, 
+                  reps = 100, 
+                  turns = 100, 
+                  num_removals = 5)
+
+aucs_elephant <- tibble(ratios = c(diffs_5_rems, diffs_10_rems, diffs_20_rems), 
+                        removals = rep(c(5, 10, 20), each = 100)) %>% 
+  mutate(removals = as.factor(removals))
+
+aucs_elephant[-213,] %>% 
+  ggplot(aes(x = ratios, fill = removals)) +
+  geom_density(alpha = 0.3) + 
+  geom_vline(xintercept = 1, linetype = 3) + 
+  theme_bw() + 
+  labs(title = "Ratios of areas under the curve", 
+       subtitle = "Elephant data")
+```
+
+Most of the ratios fall squarely around 1. It seems then that random removals - at least for these numbers - do not change trajectories of diffusion much. 
+
+Let's look at the dolphin data. 
+
+```{r}
+# Now run 100 
+diffs_10_rems <- multiple_diff_auc(ev = 1, 
+                  g = dolphin_net, 
+                  reps = 100, 
+                  turns = 100, 
+                  num_removals = 10)
+
+diffs_20_rems <- multiple_diff_auc(ev = 1, 
+                  g = dolphin_net, 
+                  reps = 100, 
+                  turns = 100, 
+                  num_removals = 20)
+diffs_5_rems <- multiple_diff_auc(ev = 1, 
+                  g = dolphin_net, 
+                  reps = 100, 
+                  turns = 100, 
+                  num_removals = 5)
+
+aucs_dolphin <- tibble(ratios = c(diffs_5_rems, diffs_10_rems, diffs_20_rems), 
+                        removals = rep(c(5, 10, 20), each = 100)) %>% 
+  mutate(removals = as.factor(removals))
+
+```
+
+It seems we have very large ratios at times. This might be because we remove isolates or unconnected individuals, making transmission more efficient. 
+
+```{r}
+aucs_dolphin %>% 
+  arrange(desc(ratios)) %>% 
+  slice(1:10)
+```
+We have some pretty big numbers. I'm going to remove those for plotting but they are worth keeping in mind. 
+
+```{r}
+aucs_dolphin %>%
+  filter(ratios <= 40) %>% 
+  ggplot(aes(x = ratios, fill = removals)) +
+  geom_density(alpha = 0.3) + 
+  geom_vline(xintercept = 1, linetype = 3) + 
+  theme_bw() + 
+  labs(title = "Ratios of areas under the curve", 
+       subtitle = "Dolphin data")
+```
+
+Again, the differences here are centered around one but we notice really long tails with quite a lot of variance. We notice there are considerably more values below one, indicating removal led to more sluggish trajectories of transmission. But we cannot discern a clear pattern here. 
+
+## Next steps 
+
+This is an initial overview. I think the some next steps to follow could be the following: 
+
+1) Look at diffusion trajectories when we impose higher thresholds on what constitutes a tie. 
+
+2) Look at diffusion trajectories on the networks for different waves.
+
+3) Incorporate more principled removal procedures. 
+
+4) Incorporate dynamic networks into our diffusion simulations
