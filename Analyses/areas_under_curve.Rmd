@@ -1,0 +1,499 @@
+---
+title: "Areas under the curve"
+author: "Nicolas Restrepo"
+date: "4/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+```{r}
+library(tidyverse)
+library(igraph)
+library(brainGraph)
+library(patchwork)
+library(bayestestR)
+library(netrankr)
+library(ggrepel)
+library(corrplot)
+```
+
+One of the challenges here is that there is a lot of variance in our simulations. This makes it hard to draw any strong conclusions. I am going to calculate areas under the curve here, but starting the simulation always on a structurally equivalent node. The idea is to at least fight off some of the uncertainty that comes with simulations. 
+
+## Functions 
+
+I am goint to begin by loading up the functions we need.
+
+```{r}
+inverse_efficiency <- function(g) {
+  # Turn it into an adjacency matrix 
+  net_mat <- as_adj(g,
+                    attr = 'weight', 
+                    sparse = F)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  # Populate the diagonal with 0s
+  diag(mat_inv) <- 0
+  
+  # Create the new graph 
+  net_inv <- graph_from_adjacency_matrix(mat_inv, 
+                                         weighted = T, 
+                                         mode = 'undirected')
+  D <- distances(net_inv, 
+                 weights = E(net_inv)$weight)
+  D <- D + 1 
+  diag(D) <- 0
+  Nv <- nrow(D)
+  Dinv <- 1/D
+  eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+  geff <- sum(eff)/length(eff)
+  
+  return(geff)
+}
+decrease_efficiency <- function(g) {
+  # Get the original efficiency
+  og_geff <- inverse_efficiency(g)
+  # A matrix to store the data
+  removal_df <- matrix(NA, ncol = 7, nrow = length(V(g)))
+  # Inverse network 
+  net_mat <- as_adj(g, 
+                    attr = "weight",
+                    sparse = FALSE)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  for (i in 1:length(V(g))) {
+    vert <- V(g)[i]
+    deg <- degree(g)[vert]
+    ecent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+    bcent <- betweenness(g, directed = FALSE, weights = E(inv_network)$weight)[vert]
+    bonacich_cent <- power_centrality(g, exponent = 1, rescale = T)[vert]
+    net_mat <- as_adj(g, attr = 'weight', sparse = F)
+    sum_weigths <- sum(net_mat[vert,], na.rm = T)
+    ng <- delete.vertices(g, vert)
+    eff <- inverse_efficiency(ng)
+    removal_df[i,] <- c(names(vert), 
+                        eff-og_geff,
+                        deg,
+                        sum_weigths, 
+                        ecent, 
+                        bcent, 
+                        bonacich_cent)
+  }
+  
+  removal_df <- data.frame(removal_df)
+  names(removal_df) <- c("node_name", "change_efficiency",
+                         "degree", "sum_edge_weights", 
+                         "eigen_centrality", 
+                         "betweenness", 
+                         "bonacich")
+  removal_df <- removal_df %>% 
+    mutate_at(vars(-("node_name")),as.numeric)
+  
+  # Build an edgelist to find family ties
+  edgelist <- get.data.frame(g)
+  
+  # See which lines fullfil the requirements for kinship ties
+  kinship_ties <- rep(NA, nrow(edgelist))
+  
+  for (i in 1:nrow(edgelist)) {
+    pat_from <- edgelist$from[i]
+    if (str_detect(edgelist$to[i], "\\.") != TRUE) {
+      kinship_ties[i] <- 0
+    } else {
+      pat_to <- sub("\\..*", "", edgelist$to[i])
+      if (pat_from==pat_to) {
+        kinship_ties[i] <- 1
+      } else {
+        kinship_ties[i] <- 0
+      }
+    }
+  }
+  
+  edgelist$kinship <- kinship_ties
+  
+  mothers <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(from)
+  
+  children <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(to)
+  
+  removal_df <- removal_df %>% 
+    mutate(mothers = if_else(node_name %in% mothers, 1, 0), 
+           children = if_else(node_name %in% children, 1, 0))
+  
+  return(removal_df)
+}
+# Contagion model from Acerbi et al (2020)
+info_contagion_cent <- function(net, rewire, e = 1, r_max, sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+adjm <- get.adjacency(net, 
+                      sparse = F, 
+                      attr = "weight")
+
+# Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+# adjm_bool <- adjm > 0
+mat_inv <- adjm 
+edges <- which(mat_inv > 0)
+mat_inv[edges] <- 1.0001 - mat_inv[edges]
+inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                           mode = "undirected",
+                                           weighted = TRUE)
+# Set number of individuals based adjacency matrix
+N <- vcount(net)
+
+# Create a vector indicating possession of info and set one entry to TRUE
+info <- rep(FALSE, N)
+info[which.max(betweenness(net, directed = FALSE, weights = E(inv_network)$weight))] <- TRUE
+
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      nei <- adjm[i,] > 0
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+multiple_diff_auc <- function(ev, g, g2, reps, turns) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion_cent(g, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+    auc_nr <- area_under_curve(x = sim$time, 
+                            y = sim$proportion)
+    
+  # Now with removal
+  sim_r <- info_contagion_cent(g2, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+  auc_r <- area_under_curve(x = sim_r$time, 
+                            y = sim_r$proportion)
+  
+  diff <- auc_r/auc_nr
+  
+    values[i] <- diff
+  }
+  return(values)
+}
+```
+
+## Elephant Data 
+
+### Wave 1 
+
+Build the network. 
+
+```{r}
+# Import the data 
+elephant_data <- read_csv("Data/dist.matrix.t1.csv")
+# Transform data into square matrix
+elephant_matrix <- elephant_data %>% 
+  select(2:ncol(elephant_data)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data)[2:ncol(elephant_data)]
+colnames(elephant_matrix) <- node_IDs
+rownames(elephant_matrix) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix <- matrix(1, 97, 97) - elephant_matrix
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix) <- 0
+# Now create the network
+elephant_graph_inv <- 
+graph_from_adjacency_matrix(inv_elephant_matrix, mode = "undirected", weighted = T)
+
+# First removal
+removal_ed_w1_one <- decrease_efficiency(elephant_graph_inv)
+
+# Pull the five most influential nodes
+top_nodes_ed_w1 <- removal_ed_w1_one %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+ed_w1_rems <- delete.vertices(elephant_graph_inv, V(elephant_graph_inv)[top_nodes_ed_w1])
+```
+
+Now, let's calculate the ratio of areas under the curve. 
+```{r}
+set.seed(76)
+auc_diffs_targeted <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph_inv, 
+                  g2 = ed_w1_rems,
+                  reps = 100, 
+                  turns = 500)
+tibble(run = 1:100, 
+       difference = auc_diffs_targeted) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density() + 
+  geom_vline(xintercept = median(auc_diffs_targeted), 
+             lty = 2) + 
+  theme_bw() +
+  labs(title = "Ratio of areas under the curve", 
+       subtitle = "Elephant Data - Wave 1", 
+       x = "Ratio", 
+       y = "")
+
+```
+We got a median that is clearly below 1 but there is still a fair amount of uncertainty. 
+
+### Wave 2 
+
+```{r}
+# Network for wave 2 elephant data 
+# Import the data 
+elephant_data_w2 <- read_csv("Data/dist.matrix.t2.csv")
+# Transform data into square matrix
+elephant_matrix_w2 <- elephant_data_w2 %>% 
+  select(2:ncol(elephant_data_w2)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data_w2)[2:ncol(elephant_data_w2)]
+colnames(elephant_matrix_w2) <- node_IDs
+rownames(elephant_matrix_w2) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix_w2 <- matrix(1, 130, 130) - elephant_matrix_w2
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix_w2) <- 0
+# Replace with NAs with 0s 
+inv_elephant_matrix_w2 <- replace_na(inv_elephant_matrix_w2, 0)
+# Now create the network
+elephant_graph_w2<- 
+graph_from_adjacency_matrix(inv_elephant_matrix_w2, mode = "undirected", weighted = T)
+
+
+# First removal
+removal_ed_w2_one <- decrease_efficiency(elephant_graph_w2)
+
+# Pull the five most influential nodes
+top_nodes_ed_w2 <- removal_ed_w2_one %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+ed_w2_rems <- delete.vertices(elephant_graph_w2, V(elephant_graph_w2)[top_nodes_ed_w2])
+
+```
+
+```{r}
+set.seed(76)
+auc_diffs_targeted <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph_w2, 
+                  g2 = ed_w2_rems,
+                  reps = 100, 
+                  turns = 500)
+tibble(run = 1:100, 
+       difference = auc_diffs_targeted) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density() + 
+  geom_vline(xintercept = median(auc_diffs_targeted), 
+             lty = 2) + 
+  theme_bw() +
+  labs(title = "Ratio of areas under the curve", 
+       subtitle = "Elephant Data - Wave 2", 
+       x = "Ratio", 
+       y = "")
+
+```
+Slightly higher variance here. Median still below one but higher than in wave 1. 
+
+### Wave 3 
+
+```{r}
+# Network elephant data wave 3 
+# Import the data 
+elephant_data_w3 <- read_csv("Data/dist.matrix.t3.csv")
+# Transform data into square matrix
+elephant_matrix_w3 <- elephant_data_w3 %>% 
+  select(2:ncol(elephant_data_w3)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data_w3)[2:ncol(elephant_data_w3)]
+colnames(elephant_matrix_w3) <- node_IDs
+rownames(elephant_matrix_w3) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix_w3 <- matrix(1, 120, 120) - elephant_matrix_w3
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix_w3) <- 0
+# Replace with NAs with 0s 
+inv_elephant_matrix_w3 <- replace_na(inv_elephant_matrix_w3, 0)
+# Now create the network
+elephant_graph_w3<- 
+graph_from_adjacency_matrix(inv_elephant_matrix_w3, mode = "undirected", weighted = T)
+
+# First removal
+removal_ed_w3_one <- decrease_efficiency(elephant_graph_w3)
+
+# Pull the five most influential nodes
+top_nodes_ed_w3 <- removal_ed_w3_one %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+ed_w3_rems <- delete.vertices(elephant_graph_w3, V(elephant_graph_w3)[top_nodes_ed_w3])
+
+```
+
+```{r}
+set.seed(76)
+auc_diffs_targeted <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph_w3, 
+                  g2 = ed_w3_rems,
+                  reps = 100, 
+                  turns = 500)
+tibble(run = 1:100, 
+       difference = auc_diffs_targeted) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density() + 
+  geom_vline(xintercept = median(auc_diffs_targeted), 
+             lty = 2) + 
+  theme_bw() +
+  labs(title = "Ratio of areas under the curve", 
+       subtitle = "Elephant Data - Wave 3", 
+       x = "Ratio", 
+       y = "")
+
+```
+
+Here, the ratio is above 1! Interesting. Let's look at the dolphin data. 
+
+## Dolphin Data 
+
+### Wave 1 
+
+```{r}
+# Network dolphin data wave 1
+# Import the data
+dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
+
+# Write function to return the graph from a wave
+# Function to plot the networks 
+dolphin_edgelist <- function(w, t) {
+  # Conditional statements for the waves 
+  if (w == 1) {
+    c <- "T2008"
+    title <- "Wave 1"
+  } else {
+    if(w ==2) {
+      c <- "T2010"
+      title <- "Wave 2"
+    } else {
+      if (w==3) {
+        c <- "T2012"
+        title <- "Wave 3"
+      } else {
+        if (w == 4) {
+          c <- "T2014"
+          title <- "Wave 4"
+        } else {
+          if (w == 5) {
+            c <- "T2016"
+            title <- "Wave 5"
+          } else {
+            c <- "T2018"
+            title <- "Wave 6"
+          }
+        }
+      }
+    }
+  }
+  # Take the wave 
+  edgelist <- dolphin_edge_lists %>% 
+    select(1,2, c, 9) %>% 
+    filter(!is.na(.[,3]) & .[,3] > t) %>% 
+    rename(weight = c, 
+           from = ID1, 
+           to = ID2)
+  
+  net <- graph_from_data_frame(edgelist, directed = FALSE)
+  return(net)
+}
+# Import the ID list data 
+# Contains removal information 
+id_list <- read_csv("Data/ID_list.csv")
+dolphin_w1 <- dolphin_edgelist(w = 1, 
+                               t = 0)
+
+# First removal
+removal_dd_w1_one <- decrease_efficiency(dolphin_w1)
+
+# Pull the five most influential nodes
+top_nodes_dd_w1 <- removal_dd_w1_one %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dd_w1_rems <- delete.vertices(dolphin_w1, V(dolphin_w1)[top_nodes_dd_w1])
+
+
+```
+
+```{r}
+set.seed(76)
+auc_diffs_targeted <- multiple_diff_auc(ev = 1, 
+                  g = dolphin_w1, 
+                  g2 = dd_w1_rems,
+                  reps = 100, 
+                  turns = 500)
+tibble(run = 1:100, 
+       difference = auc_diffs_targeted) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density() + 
+  geom_vline(xintercept = median(auc_diffs_targeted), 
+             lty = 2) + 
+  theme_bw() +
+  labs(title = "Ratio of areas under the curve", 
+       subtitle = "Dolphin Data - Wave 1", 
+       x = "Ratio", 
+       y = "")
+
+```
+

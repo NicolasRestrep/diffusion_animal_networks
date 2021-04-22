@@ -1,0 +1,420 @@
+---
+title: "Different ways of approaching distance and diffusion"
+author: "Nicolas Restrepo"
+date: "1/29/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(igraph)
+library(brainGraph)
+library(patchwork)
+library(bayestestR)
+```
+
+## Introduction 
+
+Farine and Whitehead repeatedly caution against thresholding and I agree with them. Any threshold we can come up with will be, to a certain extent, arbitrary and throwing away information is never a good idea. What we need to figure out then is how we go about tackling cultural diffusion in a principled way whilst keeping all the ties in the network. We need to reflect that - for instance - information is less likely to spread across a tie that has an AI score of 0.1 than through one that has a score of 0.97. I don't think the measure of global efficiency and our simple contagion simulations are doing this. 
+
+## Efficiency in an Association Matrix
+
+Recall that the measure of global efficiency is the average of the inverse distances between all nodes in a network. This can incorporate weights. If I have to go through two ties to reach node j from node i the distance would be the sum of the weights of those two ties. However, in an Association Matrix like the ones we have, where there is a "tie" - no matter how tenuous - between most nodes, the story is more complicated. 
+
+Let me provide an example with the elephant data. This nodes 5 to 10 of the matrix: 
+
+```{r}
+# Import the data 
+elephant_data <- read_csv("Data/dist.matrix.t1.csv")
+# Transform data into square matrix
+elephant_matrix <- elephant_data %>% 
+  select(2:ncol(elephant_data)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data)[2:ncol(elephant_data)]
+colnames(elephant_matrix) <- node_IDs
+rownames(elephant_matrix) <- node_IDs
+
+# Build inverse matrix
+inv_elephant_matrix <- matrix(1, 97, 97) - elephant_matrix
+
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix) <- 0
+
+# Now create the network
+elephant_graph_inv <- 
+graph_from_adjacency_matrix(inv_elephant_matrix, mode = "undirected", weighted = T)
+
+# Let's see the first three nodes 
+inv_elephant_matrix[5:10,5:10]
+
+```
+
+Alright, notice that we have some fairly strong associations (R8-R9), some weaker ones (R10-R6), and instances of no ties (R10-R5). 
+
+To calculate global efficiency, we need to produce the distances between the nodes. I will that and we will notice some interesting patterns: 
+
+```{r}
+# Get the distance matrix
+D <- distances(elephant_graph_inv, weights = E(elephant_graph_inv)$weight)
+
+D[5:10,5:10]
+
+```
+
+R8-R9 was a relatively strong association and the distance is relatively small. However, look at the distance between R10 and R6. Not only is it very small but it is the exact same value as the weighted edge between them. My guess is that there is a combination of ties that links R8 and R9 whose sum is smaller than their direct ties. R10 and R6 have a very tenuous yet direct tie between them and this is taken as the distance. Let's investigate this. 
+
+I am going to find the shortest path between R8 and R9. 
+
+```{r}
+# Find shortest path between R8 and R9
+all_shortest_paths(elephant_graph_inv, from = 'R8', to = 'R9', mode = 'all')$res
+
+# Now compare the sum of this entire path 
+inv_elephant_matrix['R8', 'M65']
+inv_elephant_matrix['R9', 'M65']
+```
+
+The algorithm takes two almost non-existent ties and sums together. This is heavily penalizing ties that are actually strong, imagining that weight is distance. 
+
+Maybe then we should use the matrix as originally stored, where 1 was zero association. We can replace the 1s though, as we are confident there is no tie there. 
+
+```{r}
+# Replace 1s with 0s 
+elephant_matrix[elephant_matrix==1] <- 0
+
+# Create graph 
+eg_regular <- graph_from_adjacency_matrix(elephant_matrix, mode = "undirected", weighted = T)
+
+# Distance for this graph 
+D <- distances(eg_regular, weights = E(eg_regular)$weight)
+
+D[5:10, 5:10]
+```
+Now, this makes a lot more sense! While R8 and R9 are relatively close, R10 and R5 (that have no direct tie between them) are quite far apart. 
+
+Perhaps calculating efficiency on these distances makes a lot more sense. 
+
+```{r}
+# Our function for efficiency after removal
+efficiency_after_random_removal <- function(g, reps, num_removals) {
+  # placeholder 
+  efficiencies <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    rmv <- sample(1:vcount(g), num_removals)
+    ng <- delete.vertices(g,rmv)
+    D <- distances(ng, 
+               weights = E(ng)$weight)
+    D <- D + 1 
+    diag(D) <- 0
+    Nv <- nrow(D)
+    Dinv <- 1/D
+    eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+    geff <- sum(eff)/length(eff)
+    efficiencies[i] <- geff
+  }
+  avg_eff <- mean(efficiencies)
+  sd_eff <- sd(efficiencies)
+  upper <- avg_eff + 1.96*sd_eff
+  lower <- avg_eff - 1.96*sd_eff
+  return(c(avg_eff = avg_eff, 
+           upper = upper, 
+           lower = lower, 
+           removals = num_removals))
+}
+
+# Dataset for eff at different levels of removal
+elephant_rr_df <- map_df(c(1:30), 
+                    efficiency_after_random_removal, 
+                        g=eg_regular, 
+                        reps = 100)
+
+elephant_rr_df %>% 
+  ggplot(aes(x = removals, y = avg_eff)) +
+  geom_line(color = "gray") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + 
+  theme_bw() + 
+  labs(title = "Global efficiency after random removal", 
+       subtitle = "Elephant Data - Wave 1",
+       x = "Removals", 
+       y = "Efficiency")
+```
+
+We notice that though the central tendency remains similar, the variance increases considerably. Here, we have instances where removing random nodes considerably affects the efficiency of the graph. It may increase it by removing loosely connected nodes or decrease it by removing paths that were linking different clusters. 
+
+Let's see how this new way of conceptualizing distance affects centrality-based removal. The difference here is that I am going to consider efficiency using the data as is (with the inverse distances) but I will assess centrality using the reverse-coded network. 
+
+```{r}
+# Write a function for removal of central nodes
+efficiency_after_centrality_removal <- function(g, reps, num_removals, cent_scores) {
+  # placeholder 
+  efficiencies <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    centrality <- cent_scores 
+    centrality <- sort(centrality, decreasing = T) 
+    central_nodes <- names(centrality)
+    ng <- delete.vertices(g,central_nodes[1:num_removals])
+    D <- distances(ng, 
+               weights = E(ng)$weight)
+    D <- D + 1 
+    diag(D) <- 0
+    Nv <- nrow(D)
+    Dinv <- 1/D
+    eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+    geff <- sum(eff)/length(eff)
+    efficiencies[i] <- geff
+  }
+  avg_eff <- mean(efficiencies)
+  sd_eff <- sd(efficiencies)
+  upper <- avg_eff + 1.96*sd_eff
+  lower <- avg_eff - 1.96*sd_eff
+  return(c(avg_eff = avg_eff, 
+           upper = upper, 
+           lower = lower, 
+           removals = num_removals))
+}
+
+# Dataset for eff at different levels of removal
+elephant_rr_df <- map_df(c(1:5), 
+                    efficiency_after_centrality_removal, 
+                        g=eg_regular, 
+                        reps = 100, 
+                    cent_scores = eigen_centrality(elephant_graph_inv)$vector)
+
+elephant_rr_df %>% 
+  ggplot(aes(x = removals, y = avg_eff)) +
+  geom_line(color = "gray") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + 
+  theme_bw() + 
+  labs(title = "Global efficiency after centrality removal", 
+       subtitle = "Elephant Data - Wave 1",
+       x = "Removals", 
+       y = "Efficiency")
+
+```
+
+In general the efficiency does go down, but the decrease is only slight. There is not a considerable drop until we remove the fifth most central node of the network and even then the difference is relatively small.  
+
+## Diffusion and Weights 
+
+I have spent a bit of time with the diffusion function I had been using and I realized it does not incorporate weights very well. I am going to re-write that function so that the probability of adoption at any turn considers the weights of each edge. A principled way of doing this for instance is letting each edge add a probability of transmission equal to its weight (i.e. $\frac{weight}{1}$. The sum of these fractions for all edges that an agent j has represents its probability of acquiring the behavior in a given turn. 
+
+Let's see whether this specification changes trajectories of diffusion.
+
+```{r}
+# Contagion model from Acerbi et al (2020)
+info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+  adjm <- get.adjacency(net, 
+                        sparse = F, 
+                        attr = "weight")
+  
+  # Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+  # adjm_bool <- adjm > 0
+  
+  # Set number of individuals based adjacency matrix
+  N <- vcount(net)
+  
+  # Create a vector indicating possession of info and set one entry to TRUE
+  info <- rep(FALSE, N)
+  info[sample(x = N, size = 1)] <- TRUE
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      nei <- adjm[i,] > 0
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+
+# Contagion with no removal
+e_sim_nr <- info_contagion(elephant_graph_inv, 
+                           rewire = F, 
+                           e = 1, 
+                           r_max = 500)
+
+p1 <- e_sim_nr %>% 
+  ggplot(aes(x = time, y = proportion)) +
+  geom_line() + 
+  theme_bw() + 
+  labs(title = "No removal")
+
+# Now some random removal
+rmv <- sample(1:vcount(elephant_graph_inv), 10)
+ng <- delete.vertices(elephant_graph_inv, rmv)
+
+
+# Contagion with random removal
+e_sim_r <- info_contagion(ng, 
+                           rewire = F, 
+                           e = 1, 
+                           r_max = 500)
+
+p2 <- e_sim_r %>% 
+  ggplot(aes(x = time, y = proportion)) +
+  geom_line() + 
+  theme_bw() + 
+  labs(title = "10 nodes removed")
+
+p1 + p2
+
+```
+First, notice that the behavior takes now a lot longer to spread. Second, we see that the spread is slower when nodes have been removed. This is perhaps more like what we expected from these simulations. 
+
+This time I am going to try a slightly different metric than a ratio between areas under the curve. This is only because ratios are sometimes hard to understand. I am going to take the turn where the simulation without removal reaches the maximum - i.e. when the proportion equals 1. I am going to do the same for the simulation with the removal, and I will subtract the latter from the former. Positive values then will indicate that the network without removals was more efficient at reaching all nodes and vice-versa. 
+
+```{r}
+turn_reached_max <- function(ev, g, reps, turns, num_removals) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                          rewire = F, 
+                          e = ev, 
+                          r_max = turns)
+    ttm <- sim$time_to_max[1]
+  
+    # Now some random removal
+    rmv <- sample(1:vcount(g), num_removals)
+    ng <- delete.vertices(g, rmv)
+    sim_r <- info_contagion(ng, 
+                            rewire = F, 
+                            e = ev, 
+                            r_max = turns)
+    ttmr <- sim_r$time_to_max[1]
+    
+    values[i] <- ttm-ttmr
+  }
+  return(values)
+}
+
+diffs_10_rems <- turn_reached_max(ev = 1, 
+                 g = elephant_graph_inv, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 10)
+diffs_20_rems <- turn_reached_max(ev = 1, 
+                 g = elephant_graph_inv, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 20)
+diffs_5_rems <- turn_reached_max(ev = 1, 
+                 g = elephant_graph_inv, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 5)
+
+aucs_elephant <- tibble(ratios = c(diffs_5_rems, diffs_10_rems, diffs_20_rems), 
+                        removals = rep(c(5, 10, 20), each = 100)) %>% 
+  mutate(removals = as.factor(removals))
+
+aucs_elephant %>% 
+  ggplot(aes(x = ratios, fill = removals)) +
+  geom_density(alpha = 0.3) + 
+  geom_vline(xintercept = 1, linetype = 3) + 
+  theme_bw() + 
+  labs(title = "Differences between turn to reach maximum", 
+       subtitle = "Elephant data",
+       x = "Differences")
+
+```
+The distributions are squarely centered around one. Even with our new recoding of the diffusion function, it seems like the random removal of nodes does not have a huge impact on how quickly a trait diffuses across the network. 
+
+```{r}
+turn_reached_max_centrality <- function(ev, g, reps, turns, num_removals) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                          rewire = F, 
+                          e = ev, 
+                          r_max = turns)
+    ttm <- sim$time_to_max[1]
+  
+    # Now some centrality removal
+    centrality <- eigen_centrality(g)$vector 
+    centrality <- sort(centrality, decreasing = T) 
+    central_nodes <- names(centrality)
+    ng <- delete.vertices(g,central_nodes[1:num_removals])
+    sim_r <- info_contagion(ng, 
+                            rewire = F, 
+                            e = ev, 
+                            r_max = turns)
+    ttmr <- sim_r$time_to_max[1]
+    
+    values[i] <- ttm-ttmr
+  }
+  return(values)
+}
+
+diffs_5_rems <- turn_reached_max_centrality(ev = 1, 
+                 g = elephant_graph_inv, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 5)
+diffs_2_rems <- turn_reached_max_centrality(ev = 1, 
+                 g = elephant_graph_inv, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 2)
+diffs_1_rems <- turn_reached_max_centrality(ev = 1, 
+                 g = elephant_graph_inv, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 1)
+
+aucs_elephant <- tibble(ratios = c(diffs_5_rems, diffs_1_rems, diffs_2_rems), 
+                        removals = rep(c(5, 1, 2), each = 100)) %>% 
+  mutate(removals = as.factor(removals))
+
+aucs_elephant %>% 
+  ggplot(aes(x = ratios, fill = removals)) +
+  geom_density(alpha = 0.3) + 
+  geom_vline(xintercept = 1, linetype = 3) + 
+  theme_bw() + 
+  labs(title = "Differences between turn to reach maximum", 
+       subtitle = "Elephant data - Centrality Removal",
+       x = "Differences")
+
+```
+
+Centrality-based removal also does not seem to have a huge impact in how quickly or slowly a trait spreads across the network. 

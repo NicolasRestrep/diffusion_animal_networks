@@ -1,0 +1,955 @@
+---
+title: "Inference and Network Features"
+author: "Nicolas Restrepo"
+date: "3/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(igraph)
+library(brainGraph)
+library(patchwork)
+library(bayestestR)
+library(netrankr)
+library(ggrepel)
+library(corrplot)
+```
+
+## Introduction
+
+Here, I am going to examine if there is indeed a difference in the graphs' capacity to transmit information after we have removed certain nodes. Additionally, I will explore whether these decreases in the networks' efficiency are correlated with some of their structural features. To explore differences, I will look at the contagion plots we have used in the past but I will also try to quantify the difference between these trajectories. 
+
+## Exploring differences between the networks
+
+### Elephant Data - Wave 1 
+
+I am going to begin by looking at wave 1 of the elephant data. We know from previous analyses that we did find some differences in the trajectories of diffusion here, but they were small. 
+
+Let's read in the data and build the network. 
+
+```{r}
+# Import the data 
+elephant_data <- read_csv("Data/dist.matrix.t1.csv")
+# Transform data into square matrix
+elephant_matrix <- elephant_data %>% 
+  select(2:ncol(elephant_data)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data)[2:ncol(elephant_data)]
+colnames(elephant_matrix) <- node_IDs
+rownames(elephant_matrix) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix <- matrix(1, 97, 97) - elephant_matrix
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix) <- 0
+# Now create the network
+elephant_graph_inv <- 
+graph_from_adjacency_matrix(inv_elephant_matrix, mode = "undirected", weighted = T)
+
+```
+
+### Diffusion Trajectories 
+
+Now, I am going to use different removal strategies. I will use targeted removal, centrality-based removal, and degree-based removal. I am going to then run simulations on the resulting networks and plot the average trajectories of transmission. 
+
+```{r}
+inverse_efficiency <- function(g) {
+  # Turn it into an adjacency matrix 
+  net_mat <- as_adj(g,
+                    attr = 'weight', 
+                    sparse = F)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  # Populate the diagonal with 0s
+  diag(mat_inv) <- 0
+  
+  # Create the new graph 
+  net_inv <- graph_from_adjacency_matrix(mat_inv, 
+                                         weighted = T, 
+                                         mode = 'undirected')
+  D <- distances(net_inv, 
+                 weights = E(net_inv)$weight)
+  D <- D + 1 
+  diag(D) <- 0
+  Nv <- nrow(D)
+  Dinv <- 1/D
+  eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+  geff <- sum(eff)/length(eff)
+  
+  return(geff)
+}
+```
+
+```{r}
+decrease_efficiency <- function(g) {
+  # Get the original efficiency
+  og_geff <- inverse_efficiency(g)
+  # A matrix to store the data
+  removal_df <- matrix(NA, ncol = 7, nrow = length(V(g)))
+  # Inverse network 
+  net_mat <- as_adj(g, 
+                    attr = "weight",
+                    sparse = FALSE)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  for (i in 1:length(V(g))) {
+    vert <- V(g)[i]
+    deg <- degree(g)[vert]
+    ecent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+    bcent <- betweenness(g, directed = FALSE, weights = E(inv_network)$weight)[vert]
+    bonacich_cent <- power_centrality(g, exponent = 1, rescale = T)[vert]
+    net_mat <- as_adj(g, attr = 'weight', sparse = F)
+    sum_weigths <- sum(net_mat[vert,], na.rm = T)
+    ng <- delete.vertices(g, vert)
+    eff <- inverse_efficiency(ng)
+    removal_df[i,] <- c(names(vert), 
+                        eff-og_geff,
+                        deg,
+                        sum_weigths, 
+                        ecent, 
+                        bcent, 
+                        bonacich_cent)
+  }
+  
+  removal_df <- data.frame(removal_df)
+  names(removal_df) <- c("node_name", "change_efficiency",
+                         "degree", "sum_edge_weights", 
+                         "eigen_centrality", 
+                         "betweenness", 
+                         "bonacich")
+  removal_df <- removal_df %>% 
+    mutate_at(vars(-("node_name")),as.numeric)
+  
+  # Build an edgelist to find family ties
+  edgelist <- get.data.frame(g)
+  
+  # See which lines fullfil the requirements for kinship ties
+  kinship_ties <- rep(NA, nrow(edgelist))
+  
+  for (i in 1:nrow(edgelist)) {
+    pat_from <- edgelist$from[i]
+    if (str_detect(edgelist$to[i], "\\.") != TRUE) {
+      kinship_ties[i] <- 0
+    } else {
+      pat_to <- sub("\\..*", "", edgelist$to[i])
+      if (pat_from==pat_to) {
+        kinship_ties[i] <- 1
+      } else {
+        kinship_ties[i] <- 0
+      }
+    }
+  }
+  
+  edgelist$kinship <- kinship_ties
+  
+  mothers <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(from)
+  
+  children <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(to)
+  
+  removal_df <- removal_df %>% 
+    mutate(mothers = if_else(node_name %in% mothers, 1, 0), 
+           children = if_else(node_name %in% children, 1, 0))
+  
+  removal_df <- removal_df %>% 
+  mutate_at(.vars = c("change_efficiency",
+                      "degree", "sum_edge_weights", 
+                      "eigen_centrality", 
+                      "betweenness", 
+                      "bonacich"), 
+            as.numeric)
+  
+  
+  return(removal_df)
+}
+
+# First removal
+removal_ed_w1_one <- decrease_efficiency(elephant_graph_inv)
+```
+
+```{r}
+ set.seed(76)
+# Contagion model from Acerbi et al (2020)
+info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+  adjm <- get.adjacency(net, 
+                        sparse = F, 
+                        attr = "weight")
+  
+  # Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+  # adjm_bool <- adjm > 0
+  
+  # Set number of individuals based adjacency matrix
+  N <- vcount(net)
+  
+  # Create a vector indicating possession of info and set one entry to TRUE
+  info <- rep(FALSE, N)
+  info[sample(x = N, size = 1)] <- TRUE
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      nei <- adjm[i,] > 0
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+top_nodes_ed_w1 <- removal_ed_w1_one %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+ed_w1_rems <- delete.vertices(elephant_graph_inv, V(elephant_graph_inv)[top_nodes_ed_w1])
+
+# Network with centrality removals 
+central_nodes_ed_w1 <- removal_ed_w1_one %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w1_central_rems <- delete.vertices(elephant_graph_inv, V(elephant_graph_inv)[central_nodes_ed_w1])
+
+
+# Network with degree removals 
+degree_nodes_ed_w1 <- removal_ed_w1_one %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w1_degree_rems <- delete.vertices(elephant_graph_inv, V(elephant_graph_inv)[degree_nodes_ed_w1])
+```
+
+Now, we can run the simulations with th networks we have. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = elephant_graph_inv, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w1_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w1_central_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w1_degree_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Elephant Data - Wave 1") + 
+  theme_bw() 
+
+```
+
+On average, the network after the targeted removals does worse, as we would expect. The graph that results after the degree-based removals is not much different, however. Here, I chose to plot some confidence intervals around the average, which is why we get values above 1 and below 0. We notice that there is a lot of variation, as we would expect from simulation work. I think this will make drawing clear-cut conclusions a bit tricky. 
+
+### Areas under the curve
+
+One way to examine whether these graphs are actually different in their capacity to transmit information is to compare the area under the curve for the trajectories of diffusion. The comparisons would go like this: 
+
+1) Run contagion model.
+2) Run contagion model with node removal. 
+3) Calculate areas under the curve for both diffusion trajectories.
+4) Find the ratio between these areas. 
+5) Repeat 1 through 4 so we get a distribution of differences of areas under the curve. 
+
+I will be dividing the area under the curve of the trajectory from the network after removals over its counterpart. Therefore, values below 1 would indicate that the network after removals is worse at transmitting information. 
+
+```{r}
+# Function to calculate the AUC of multiple runs
+multiple_diff_auc <- function(ev, g, g2, reps, turns) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+    auc_nr <- area_under_curve(x = sim$time, 
+                            y = sim$proportion)
+    
+  # Now with removal
+  sim_r <- info_contagion(g2, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+  auc_r <- area_under_curve(x = sim_r$time, 
+                            y = sim_r$proportion)
+  
+  diff <- auc_r/auc_nr
+  
+    values[i] <- diff
+  }
+  return(values)
+}
+
+auc_diffs_targeted <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph_inv, 
+                  g2 = ed_w1_rems,
+                  reps = 100, 
+                  turns = 500)
+tibble(run = 1:100, 
+       difference = auc_diffs_targeted) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density() + 
+  geom_vline(xintercept = median(auc_diffs_targeted), 
+             lty = 2, 
+             color = "red") + 
+  geom_text(x = median(auc_diffs_targeted)-0.03, y = 1, 
+            label = as.character(round(median(auc_diffs_targeted), 2)), 
+            color = "red") +
+  theme_bw() +
+  labs(title = "Ratio of areas under the curve", 
+       subtitle = "Targeted removal", 
+       x = "Ratio", 
+       y = "")
+```
+
+We notice that, on average, the ratios tend to be below 1. This means that the area under the curves for simulations using the full networks are bigger than those under the trajectories using the graphs after removal. However, the variance here is very large still. Under traditional views of hypothesis testing, this would prevent us from saying with certainty that the ratio is smaller than 1. 
+
+### Dolphin Data - Wave 6 
+
+Now, let's look at a network that displayed big differences: wave 6 of the dolphin data. I'll begin by reading in the data and building the network. 
+
+```{r}
+# Import the data
+dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
+
+# Write function to return the graph from a wave
+# Function to plot the networks 
+dolphin_edgelist <- function(w, t) {
+  # Conditional statements for the waves 
+  if (w == 1) {
+    c <- "T2008"
+    title <- "Wave 1"
+  } else {
+    if(w ==2) {
+      c <- "T2010"
+      title <- "Wave 2"
+    } else {
+      if (w==3) {
+        c <- "T2012"
+        title <- "Wave 3"
+      } else {
+        if (w == 4) {
+          c <- "T2014"
+          title <- "Wave 4"
+        } else {
+          if (w == 5) {
+            c <- "T2016"
+            title <- "Wave 5"
+          } else {
+            c <- "T2018"
+            title <- "Wave 6"
+          }
+        }
+      }
+    }
+  }
+  # Take the wave 
+  edgelist <- dolphin_edge_lists %>% 
+    select(1,2, c, 9) %>% 
+    filter(!is.na(.[,3]) & .[,3] > t) %>% 
+    rename(weight = c, 
+           from = ID1, 
+           to = ID2)
+  
+  net <- graph_from_data_frame(edgelist, directed = FALSE)
+  return(net)
+}
+
+# Import the ID list data 
+# Contains removal information 
+
+id_list <- read_csv("Data/ID_list.csv")
+
+```
+
+### Diffusion Trajectories 
+
+Now, I am ready to build all the networks using the different removal strategies.
+
+```{r}
+decrease_efficiency_dolphin <- function(g, w) {
+
+  # Get the original efficiency
+  og_geff <- inverse_efficiency(g)
+  # A matrix to store the data
+  removal_df <- matrix(NA, ncol = 7, nrow = length(V(g)))
+  # Inverse network 
+  net_mat <- as_adj(g, 
+                    attr = "weight",
+                    sparse = FALSE)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  for (i in 1:length(V(g))) {
+    vert <- V(g)[i]
+    deg <- degree(g)[vert]
+    ecent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+    bcent <- betweenness(g, directed = FALSE, weights = E(inv_network)$weight)[vert]
+    bonacich_cent <- power_centrality(g, exponent = 1, rescale = T)[vert]
+    net_mat <- as_adj(g, attr = 'weight', sparse = F)
+    sum_weigths <- sum(net_mat[vert,], na.rm = T)
+    ng <- delete.vertices(g, vert)
+    eff <- inverse_efficiency(ng)
+    removal_df[i,] <- c(names(vert), 
+                        eff-og_geff,
+                        deg,
+                        sum_weigths, 
+                        ecent, 
+                        bcent, 
+                        bonacich_cent)
+  }
+  
+  removal_df <- data.frame(removal_df)
+  names(removal_df) <- c("node_name", "change_efficiency",
+                         "degree", "sum_edge_weights", 
+                         "eigen_centrality", 
+                         "betweenness", 
+                         "bonacich")
+  removal_df <- removal_df %>% 
+    mutate_at(vars(-("node_name")),as.numeric)
+  
+    # Conditional statements for the waves 
+    if (w == 1) {
+      c <- "T2008"
+      title <- "Wave 1"
+    } else {
+      if(w ==2) {
+        c <- "T2010"
+        title <- "Wave 2"
+      } else {
+        if (w==3) {
+          c <- "T2012"
+          title <- "Wave 3"
+        } else {
+          if (w == 4) {
+            c <- "T2014"
+            title <- "Wave 4"
+          } else {
+            if (w == 5) {
+              c <- "T2016"
+              title <- "Wave 5"
+            } else {
+              c <- "T2018"
+              title <- "Wave 6"
+            }
+          }
+        }
+      }
+    }
+    # Take the wave 
+    edgelist <- dolphin_edge_lists %>% 
+      select(1,2, c, 9) %>% 
+      filter(!is.na(.[,3]) & .[,3] > 0) %>% 
+      rename(weight = c, 
+             from = ID1, 
+             to = ID2)
+    related_df <- edgelist %>% 
+      group_by(from) %>% 
+      summarize(total_relatedness = sum(relatedness_coef>0, na.rm = T)) %>% 
+      select(from, total_relatedness) %>% 
+      rename(node_name = from)
+    
+    removal_df <- removal_df %>% 
+      left_join(related_df, by = "node_name")
+    
+    sex_df <- id_list %>% 
+      select(1, w+1, 12) %>% 
+      rename(node_name = Dolphin.ID) %>% 
+      mutate(sex_binary = case_when(Sex == "MALE" ~ 0, 
+                                    Sex == "FEMALE" ~ 1)) %>% 
+      select(node_name, sex_binary)
+    
+    removal_df <- removal_df %>% 
+      left_join(sex_df, by = "node_name") %>% 
+      mutate(perc_related = total_relatedness/degree) %>% select(-total_relatedness)
+    
+    removal_df <- removal_df %>% 
+  mutate_at(.vars = c("change_efficiency",
+                      "degree", "sum_edge_weights", 
+                      "eigen_centrality", 
+                      "betweenness", 
+                      "bonacich"), 
+            as.numeric)
+  
+    
+    
+    return(removal_df)
+
+}
+
+# Network wave 6
+dolphin_w6 <- dolphin_edgelist(w = 6, 
+                               t = 0)
+
+# Examine decreases in efficiency 
+rm_df_dol_w6 <- decrease_efficiency_dolphin(dolphin_w6, 
+                            w = 6)
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+top_nodes_dd_w6 <- rm_df_dol_w6 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dd_w6_rems <- delete.vertices(dolphin_w6, V(dolphin_w6)[top_nodes_dd_w6])
+
+# Network with centrality removals 
+central_nodes_dd_w6 <- rm_df_dol_w6 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w6_central_rems <- delete.vertices(dolphin_w6, V(dolphin_w6)[central_nodes_dd_w6])
+
+
+# Network with degree removals 
+degree_nodes_dd_w6 <- rm_df_dol_w6 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w6_degree_rems <- delete.vertices(dolphin_w6, V(dolphin_w6)[degree_nodes_dd_w6])
+
+```
+
+Alright, now we have the networks, we can run the simulations.
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dolphin_w6, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w6_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w6_central_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w6_degree_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 6") + 
+  theme_bw() 
+
+```
+
+The differences here are not as clear. The trajectory for the network with targeted removals starts off more sluggish but then it overtakes the average proportion for the graph with centrality based removals. The variance here is quite high and this prevents us from talking about stark differences between these trajectories.  
+
+### Areas under the curve
+
+Let's explore how the distribution of areas under the curve look like for this network. 
+```{r}
+set.seed(76)
+auc_diffs_targeted <- multiple_diff_auc(ev = 1, 
+                  g = dolphin_w6, 
+                  g2 = dd_w6_rems,
+                  reps = 100, 
+                  turns = 500)
+tibble(run = 1:100, 
+       difference = auc_diffs_targeted) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density() + 
+  geom_vline(xintercept = median(auc_diffs_targeted), 
+             lty = 2, 
+             color = "red") + 
+  geom_text(x = median(auc_diffs_targeted)-0.03, y = 1, 
+            label = as.character(round(median(auc_diffs_targeted), 2)), 
+            color = "red") +
+  theme_bw() +
+  labs(title = "Ratio of areas under the curve", 
+       subtitle = "Targeted removal", 
+       x = "Ratio", 
+       y = "")
+
+```
+
+The median here is actually 0.79, much lower than above. But the plot suggest a huge amount of variance, including runs where the network after removals far outpaces the full network. Again, we notice central patterns that are in line with our results - i.e. this network is quite vulnerable to targeted removal - but the variance might prevent us from drawing too strong conclusions. 
+
+## Network Features
+
+In this section, I will look at whether network features are related to the graphs' vulnerability to targeted removal. In the last analyses, we noticed two patterns. First, that networks where the centrality of nodes was highly related to the change in efficiency after their removal tended to be more vulnerable. Second, that the dolphin networks were more vulnerable than the elephant networks. 
+
+In another script, I have built a dataframe that includes the following information about networks
+
+- Number of nodes.
+- Number of edges. 
+- Change in efficiency after removals.
+- Median of ratios of areas under the curve.
+- Correlation between the betweenness centrality of a node and its impact on efficiency.
+- Correlation between the eigenvector centrality of a node and its impact on efficiency.
+- Correlation between the sum of edge weights of a node and its impact on efficiency.
+- Correlation between the degree of a node and its impact on efficiency.
+- Average transitivity of the network.
+- Modularity. 
+- Density. 
+
+I'll read in that dataframe and some columns to make the description easier. 
+
+```{r}
+network_features <- read_csv("Data/network_features.csv")
+
+network_features <- network_features %>% 
+  mutate(species = c(rep('elephant',6), 
+                     rep('dolphin',12)), 
+         wave = c(1:3, 1:3, 1:6, 1:6), 
+         type = c(rep("full", 3), 
+                  rep("pruned", 3), 
+                  rep("full", 6),
+                  rep("pruned", 6)),
+         network = paste0(species, "_w", wave, "_", type))
+```
+
+I am going to begin by looking at the median of the ratio of areas under the curve for each network after targeted node removal. 
+
+```{r}
+network_features %>% 
+  ggplot(aes(x = wave, y = median_aucs_targ, color = type)) +
+  geom_point(shape = 5) + 
+  coord_flip() +
+  labs(x = "", 
+       y = "Median Ratio AUCs", 
+       title = "Ratios of AUCs", 
+       subtitle = "Targeted Removal") + 
+  theme_minimal() + 
+  facet_wrap(~species)
+
+```
+
+Let's focus on the the full networks (red points) first. The values here are resonant with our previous analyses. In general, the dolphin networks seem more vulnerable to targeted removal than the elephant structures. Wave 6 of the dolphin data is the most vulnerable, in line with what we had observed. 
+
+When we look at the pruned networks, the story changes quite a lot. The elephant networks here seem more vulnerable. The networks for wave 2 and wave 6 of the dolphin data have medians above 1, which indicates that the networks after removal tended to reach their maximum more quickly.
+
+However, it is important to remember here that there is a lot of variance around these values and that the differences between them are small. Hence, I am struggling to think how to argue that there are indeed differences in how vulnerable these structures are to targeted removal. 
+
+Let's now look at how these ratios look for the networks after centrality removal. 
+
+```{r}
+network_features %>% 
+  ggplot(aes(x = wave, y = median_aucs_cent, color = type)) +
+  geom_point(shape = 5) + 
+  coord_flip() +
+  labs(x = "", 
+       y = "Median Ratio AUCs", 
+       title = "Ratios of AUCs", 
+       subtitle = "Centrality Removal") + 
+  theme_minimal() + 
+  facet_wrap(~species)
+
+```
+
+For the full networks, the results are consistent with those above: the elephant graphs are more resilient than their dolphin counterparts. Interestingly, the results for the pruned networks preserve this structure. 
+
+One of the lines of inquiry we suggested last meeting was to examine whether network features were related to vulnerability to targeted removal. Let's explore how network features are related to the median of the ratios of AUCs for each species, and each type of network (whether pruned or full). 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'dolphin' & 
+           type == 'full') %>% 
+  select(median_aucs_targ, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Dolphin Data")
+```
+
+It's difficult to try to draw any strong conclusions. From what we can see here, in the dolphin data, networks with more nodes, and higher modularity tend to  be more vulnerable. In turn, networks with a higher number of edges, with higher average transitivity and higher density tend to be more resilient. 
+
+What happens when we look at the ratios after centrality removal. 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'dolphin' & 
+           type == 'full') %>% 
+  select(median_aucs_cent, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Dolphin Data")
+
+```
+
+The relationships for number of nodes and edges stay but are highly attenuated. The only other relationship that remains, though dwarfed, is density. 
+
+Do these relationships look similar in the pruned networks? 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'dolphin' & 
+           type == 'pruned') %>% 
+  select(median_aucs_targ, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Dolphin Data")
+
+```
+
+The signs of number of edges and density reverse completely. 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'dolphin' & 
+           type == 'pruned') %>% 
+  select(median_aucs_cent, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Dolphin Data")
+
+```
+
+Modularity displays a relatively strong negative relationship here. There is really an eclectic mix of results and I'm struggling to find a clear pattern. 
+
+Let's explore the elephant data. 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'elephant' & 
+           type == 'full') %>% 
+  select(median_aucs_targ, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Elephant Data")
+
+```
+
+We notice very different patterns here. Again, we need to remember these are only three networks, so drawing too strong conclusions is ill-advised. Perhaps the biggest commonality is the role that the number of edges plays. 
+
+Let's look at the ratios for centrality: 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'elephant' & 
+           type == 'full') %>% 
+  select(median_aucs_cent, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Elephant Data")
+
+```
+
+Density remains quite important here. 
+
+To finish, I am going to look at the pruned networks. 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'elephant' & 
+           type == 'pruned') %>% 
+  select(median_aucs_targ, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Elephant Data")
+
+```
+
+Transitivity and density here important. What about centrality removal?
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(species == 'elephant' & 
+           type == 'pruned') %>% 
+  select(median_aucs_cent, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Elephant Data")
+
+```
+
+The constant remains density. 
+
+What happens if I look at all pruned networks regardless of species? 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(type == 'pruned') %>% 
+  select(median_aucs_targ, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "All Pruned Networks")
+
+```
+
+Really strong relationships here but we need to remember that the pruned networks produce some unintelligible results here. 
+
+```{r}
+# Correlation plot dolphins
+MD <- network_features %>% 
+  filter(type == 'pruned') %>% 
+  select(median_aucs_cent, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "All Pruned Networks")
+
+```
+

@@ -317,9 +317,8 @@ In most waves, we notice one main component consisting of individuals who are qu
 One way of looking at a network's capacity for information transmission is by looking at its efficiency. Latora and Marchiori define the efficiency in communication between to nodes i and j as inversely proportional to the distance between them. 
 
 $$ Efficiency_{ij} = \frac{1}{d_{ij}}$$
-The average efficiency of a network G is the sum of all the inverse distances between each pair of nodes. The measure of efficiency is normalized so that:
+The average efficiency of a network G is the sum of all the inverse distances between each pair of nodes. 
 
-$$ 0 \leq E(G) \leq 1$$
 In this section, then, I will do the following: 
 
 1) I will choose two specific networks, one for elephants and one for dolphins. 
@@ -570,7 +569,7 @@ p2 <- e_sim_r %>%
   ggplot(aes(x = time, y = proportion)) +
   geom_line() + 
   theme_bw() + 
-  labs(title = "50 nodes removed")
+  labs(title = "10 nodes removed")
 
 p1 + p2
 

@@ -1,0 +1,2999 @@
+---
+title: "Different thresholds"
+author: "Nicolas Restrepo"
+date: "4/8/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction 
+
+
+```{r}
+library(tidyverse)
+library(igraph)
+library(brainGraph)
+library(patchwork)
+library(bayestestR)
+library(netrankr)
+library(ggrepel)
+library(corrplot)
+
+```
+
+Here, I am going to explore what happens to our results if we impose different thresholds on the network. I am going to be using a backboning technique that considers the strength and amount of the edges each node has and tries to preserve the overall structure. I will look at each of the networks we have, keeping 25% and 50% of the nodes. I am interested in whether our results vary widely. 
+
+As usual, I'll begin with wave 1 of the elephant data. 
+
+## Elephant Data 
+
+### Wave 1 
+
+Let's begin by building the full network. 
+
+```{r}
+# Import the data 
+elephant_data <- read_csv("Data/dist.matrix.t1.csv")
+# Transform data into square matrix
+elephant_matrix <- elephant_data %>% 
+  select(2:ncol(elephant_data)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data)[2:ncol(elephant_data)]
+colnames(elephant_matrix) <- node_IDs
+rownames(elephant_matrix) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix <- matrix(1, 97, 97) - elephant_matrix
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix) <- 0
+# Now create the network
+elephant_graph_inv <- 
+graph_from_adjacency_matrix(inv_elephant_matrix, mode = "undirected", weighted = T)
+```
+
+I'll load the backboning function.
+
+```{r}
+backbone_graph <- function(alpha, simple, g) {
+  
+# All edges and their weight 
+e <- cbind(igraph::as_data_frame(g)[, 1:2 ], 
+           weight = E(g)$weight)
+
+# Add graph strength and in degree of each source to graph dataframe
+# in
+# Sum all edge weigths for each node 
+w_in <- graph.strength(g,
+                       mode = "in")
+w_in <- data.frame(to = names(w_in), 
+                   w_in, stringsAsFactors = FALSE)
+# Get the degree for each node 
+k_in <- degree(g, mode = "in")
+k_in <- data.frame(to = names(k_in), 
+                   k_in, 
+                   stringsAsFactors = FALSE)
+
+# Join them both 
+e_in <- e %>%
+  left_join(w_in, by = "to") %>%
+  left_join(k_in, by = "to") %>%
+  mutate(alpha_in = (1-(weight/w_in))^(k_in-1))
+
+# Same for out degree 
+w_out <- graph.strength(g, mode = "out")
+w_out <- data.frame(from = names(w_out), w_out, stringsAsFactors = FALSE)
+k_out <- degree(g, mode = "out")
+k_out <- data.frame(from = names(k_out), k_out, stringsAsFactors = FALSE)
+
+e_out <- e %>%
+  left_join(w_out, by = "from") %>%
+  left_join(k_out, by = "from") %>%
+  mutate(alpha_out = (1-(weight/w_out))^(k_out-1))
+
+# Join everything and add alpha to the network
+#full
+e_full <- left_join(e_in, 
+                    e_out, 
+                    by = c("from", "to", "weight"))
+
+e_full <- e_full %>%
+  mutate(alpha = ifelse(alpha_in < alpha_out, alpha_in, alpha_out)) %>%
+  select(from, to, alpha)
+
+E(g)$alpha <- e_full$alpha
+
+# Finally prune the network 
+graph_pruned <- delete.edges(g, 
+                             which(E(g)$alpha >= alpha))
+graph_pruned_deleted <- delete.vertices(graph_pruned, 
+                                        which(degree(graph_pruned) == 0))
+
+# Count number of vertices
+num_e <- gsize(graph_pruned)
+num_v <- gorder(graph_pruned_deleted)
+
+res <- c(num_e, num_v)
+
+# return statement 
+if (simple == T) {
+  return(res)
+} else {
+  return(list(res, graph_pruned))
+}
+}
+```
+
+Now, I'll create the pruned networks. 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_ew1_25 <- backbone_graph(alpha = 0.4, 
+                               simple = F, 
+                               g = elephant_graph_inv)
+dnet_w1_25 <- backbone_ew1_25[[2]]
+# Keep 50% of the nodes 
+backbone_ew1_50 <- backbone_graph(alpha = 0.6, 
+                               simple = F, 
+                               g = elephant_graph_inv)
+dnet_w1_50 <- backbone_ew1_50[[2]]
+```
+
+Let's plot them to see what they look like. 
+
+```{r}
+plot(elephant_graph_inv, layout = layout.fruchterman.reingold, 
+       vertex.label = "", vertex.size = 4, edge.width = E(elephant_graph_inv)$weight, main = "Full Network", 
+     vertex.color = "white")
+
+plot(dnet_w1_50, layout = layout.fruchterman.reingold, 
+       vertex.label = "", vertex.size = 4, edge.width = E(dnet_w1_50)$weight, main = "50% Network", 
+     vertex.color = "white")
+
+plot(dnet_w1_25, layout = layout.fruchterman.reingold, 
+       vertex.label = "", vertex.size = 4, edge.width = E(dnet_w1_25)$weight, main = "25% Network", 
+     vertex.color = "white")
+```
+
+We see significant pruning of the networks. 
+
+Let's now look at how removing different nodes would descrease the efficiency of the network. First, load up the functions. 
+
+```{r}
+inverse_efficiency <- function(g) {
+  # Turn it into an adjacency matrix 
+  net_mat <- as_adj(g,
+                    attr = 'weight', 
+                    sparse = F)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  # Populate the diagonal with 0s
+  diag(mat_inv) <- 0
+  
+  # Create the new graph 
+  net_inv <- graph_from_adjacency_matrix(mat_inv, 
+                                         weighted = T, 
+                                         mode = 'undirected')
+  D <- distances(net_inv, 
+                 weights = E(net_inv)$weight)
+  D <- D + 1 
+  diag(D) <- 0
+  Nv <- nrow(D)
+  Dinv <- 1/D
+  eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+  geff <- sum(eff)/length(eff)
+  
+  return(geff)
+}
+
+decrease_efficiency <- function(g) {
+  # Get the original efficiency
+  og_geff <- inverse_efficiency(g)
+  # A matrix to store the data
+  removal_df <- matrix(NA, ncol = 7, nrow = length(V(g)))
+  # Inverse network 
+  net_mat <- as_adj(g, 
+                    attr = "weight",
+                    sparse = FALSE)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  for (i in 1:length(V(g))) {
+    vert <- V(g)[i]
+    deg <- degree(g)[vert]
+    ecent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+    bcent <- betweenness(g, directed = FALSE, weights = E(inv_network)$weight)[vert]
+    bonacich_cent <- power_centrality(g, exponent = 1, rescale = T)[vert]
+    net_mat <- as_adj(g, attr = 'weight', sparse = F)
+    sum_weigths <- sum(net_mat[vert,], na.rm = T)
+    ng <- delete.vertices(g, vert)
+    eff <- inverse_efficiency(ng)
+    removal_df[i,] <- c(names(vert), 
+                        eff-og_geff,
+                        deg,
+                        sum_weigths, 
+                        ecent, 
+                        bcent, 
+                        bonacich_cent)
+  }
+  
+  removal_df <- data.frame(removal_df)
+  names(removal_df) <- c("node_name", "change_efficiency",
+                         "degree", "sum_edge_weights", 
+                         "eigen_centrality", 
+                         "betweenness", 
+                         "bonacich")
+  removal_df <- removal_df %>% 
+    mutate_at(vars(-("node_name")),as.numeric)
+  
+  # Build an edgelist to find family ties
+  edgelist <- get.data.frame(g)
+  
+  # See which lines fullfil the requirements for kinship ties
+  kinship_ties <- rep(NA, nrow(edgelist))
+  
+  for (i in 1:nrow(edgelist)) {
+    pat_from <- edgelist$from[i]
+    if (str_detect(edgelist$to[i], "\\.") != TRUE) {
+      kinship_ties[i] <- 0
+    } else {
+      pat_to <- sub("\\..*", "", edgelist$to[i])
+      if (pat_from==pat_to) {
+        kinship_ties[i] <- 1
+      } else {
+        kinship_ties[i] <- 0
+      }
+    }
+  }
+  
+  edgelist$kinship <- kinship_ties
+  
+  mothers <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(from)
+  
+  children <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(to)
+  
+  removal_df <- removal_df %>% 
+    mutate(mothers = if_else(node_name %in% mothers, 1, 0), 
+           children = if_else(node_name %in% children, 1, 0))
+  
+  return(removal_df)
+}
+```
+
+Now, we can actually see the decrease in efficiencies and look at how it is correlated with other node attributes. 
+
+```{r}
+# Removals for the full network 
+removal_ed_w1_full <- decrease_efficiency(elephant_graph_inv)
+
+# Removals for the 25% network 
+removal_ed_w1_25 <- decrease_efficiency(dnet_w1_25)
+
+# Removals for the 50% network
+removal_ed_w1_50 <- decrease_efficiency(dnet_w1_50)
+```
+
+```{r}
+# Correlation plot full
+M <- cor(removal_ed_w1_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 1 - Elephant Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_ed_w1_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 1 - Elephant Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_ed_w1_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 1 - Elephant Data - 25%")
+
+
+
+```
+
+Notice that by the time we only keep 25% of the nodes, the story is mainly one of betweenness. I think that is illustrative. 
+
+Let's remove the most influential nodes using different techniques and run some contagion simulations on the resulting structures. 
+
+```{r}
+set.seed(76)
+# Contagion model from Acerbi et al (2020)
+info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+  adjm <- get.adjacency(net, 
+                        sparse = F, 
+                        attr = "weight")
+  
+  # Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+  # adjm_bool <- adjm > 0
+  
+  # Set number of individuals based adjacency matrix
+  N <- vcount(net)
+  
+  # Create a vector indicating possession of info and set one entry to TRUE
+  info <- rep(FALSE, N)
+  info[sample(x = N, size = 1)] <- TRUE
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      nei <- adjm[i,] > 0
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_ed50_w1 <- removal_ed_w1_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+enet_w1_50_rems <- delete.vertices(dnet_w1_50, V(dnet_w1_50)[targeted_nodes_ed50_w1])
+
+# Network with centrality removals 
+central_nodes_ed50_w1 <- removal_ed_w1_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w1_central_rems50 <- delete.vertices(dnet_w1_50, V(dnet_w1_50)[central_nodes_ed50_w1])
+
+
+# Network with degree removals 
+degree_nodes_ed50_w1 <- removal_ed_w1_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w1_degree_rems50 <- delete.vertices(dnet_w1_50, V(dnet_w1_50)[degree_nodes_ed50_w1])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_ed25_w1 <- removal_ed_w1_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+enet_w1_25_rems <- delete.vertices(dnet_w1_25, V(dnet_w1_25)[targeted_nodes_ed25_w1])
+
+# Network with centrality removals 
+central_nodes_ed25_w1 <- removal_ed_w1_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w1_central_rems25 <- delete.vertices(dnet_w1_25, V(dnet_w1_25)[central_nodes_ed25_w1])
+
+
+# Network with degree removals 
+degree_nodes_ed25_w1 <- removal_ed_w1_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w1_degree_rems25 <- delete.vertices(dnet_w1_25, V(dnet_w1_25)[degree_nodes_ed25_w1])
+
+```
+
+Let's run the simulations for the network that has 50% of the nodes. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w1_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w1_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Elephant Data - Wave 1 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+A lot of variation here and it is difficult to discern which one of the strategies hurts the structure the most. It's almost as if they result in the same trajectories. 
+
+Let's look at the network with 25% of the nodes. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w1_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w1_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Elephant Data - Wave 1 - 25% of the nodes") + 
+  theme_bw() 
+
+
+```
+
+Again, a lot of variance but we do notice that the network is pretty hurt. The targeted removal and centrality-based removal result in almost identical trajectories. 
+
+### Wave 2 
+
+Now, I am going to do the same but for wave 2 of the elephant data. 
+
+```{r}
+# Import the data 
+elephant_data_w2 <- read_csv("Data/dist.matrix.t2.csv")
+# Transform data into square matrix
+elephant_matrix_w2 <- elephant_data_w2 %>% 
+  select(2:ncol(elephant_data_w2)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data_w2)[2:ncol(elephant_data_w2)]
+colnames(elephant_matrix_w2) <- node_IDs
+rownames(elephant_matrix_w2) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix_w2 <- matrix(1, 130, 130) - elephant_matrix_w2
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix_w2) <- 0
+# Replace with NAs with 0s 
+inv_elephant_matrix_w2 <- replace_na(inv_elephant_matrix_w2, 0)
+# Now create the network
+elephant_graph_w2<- 
+graph_from_adjacency_matrix(inv_elephant_matrix_w2, mode = "undirected", weighted = T)
+
+```
+
+Let's now backbone the network 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_ew2_25 <- backbone_graph(alpha = 0.4, 
+                               simple = F, 
+                               g = elephant_graph_w2)
+enet_w2_25 <- backbone_ew2_25[[2]]
+# Keep 50% of the nodes 
+backbone_ew2_50 <- backbone_graph(alpha = 0.61, 
+                               simple = F, 
+                               g = elephant_graph_w2)
+enet_w2_50 <- backbone_ew2_50[[2]]
+
+```
+
+Let's calculate removals: 
+
+```{r}
+# Removals for the full network 
+removal_ed_w2_full <- decrease_efficiency(elephant_graph_w2)
+
+# Removals for the 25% network 
+removal_ed_w2_25 <- decrease_efficiency(enet_w2_25)
+
+# Removals for the 50% network
+removal_ed_w2_50 <- decrease_efficiency(enet_w2_50)
+
+```
+
+Let's look at the correlations: 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_ed_w2_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 2 - Elephant Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_ed_w2_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 2 - Elephant Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_ed_w2_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 2 - Elephant Data - 25%")
+
+```
+
+Betweenness here becomes even more important. Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_ed50_w2 <- removal_ed_w2_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+enet_w2_50_rems <- delete.vertices(enet_w2_50, V(enet_w2_50)[targeted_nodes_ed50_w2])
+
+# Network with centrality removals 
+central_nodes_ed50_w2 <- removal_ed_w2_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+enet_w2_central_rems50 <- delete.vertices(enet_w2_50, V(enet_w2_50)[central_nodes_ed50_w2])
+
+
+# Network with degree removals 
+degree_nodes_ed50_w2 <- removal_ed_w2_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w2_degree_rems50 <- delete.vertices(enet_w2_50, V(enet_w2_50)[degree_nodes_ed50_w2])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_ed25_w2 <- removal_ed_w2_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+enet_w2_25_rems <- delete.vertices(enet_w2_25, V(enet_w2_25)[targeted_nodes_ed25_w2])
+
+# Network with centrality removals 
+central_nodes_ed25_w2 <- removal_ed_w2_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+enet_w2_central_rems25 <- delete.vertices(enet_w2_25, V(enet_w2_25)[central_nodes_ed25_w2])
+
+
+# Network with degree removals 
+degree_nodes_ed25_w2 <- removal_ed_w2_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w2_degree_rems25 <- delete.vertices(enet_w2_25, V(enet_w2_25)[degree_nodes_ed25_w2])
+
+```
+
+Let's look at trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w2_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w2_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w2_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w2_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Elephant Data - Wave 2 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+Centrality removal seems to to being worse than the rest of the alternatives, even better than targeted removal. Let's look at the network with 25% of the edges. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w2_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w2_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w2_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w2_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Elephant Data - Wave 2 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+Here, we get a network that is perhaps less hurt by removals. Further, the trajectories of the networks with the removals are almost identical. 
+
+Let's look at wave 3. 
+
+### Wave 3 
+
+Build the network. 
+
+```{r}
+# Import the data 
+elephant_data_w3 <- read_csv("Data/dist.matrix.t3.csv")
+# Transform data into square matrix
+elephant_matrix_w3 <- elephant_data_w3 %>% 
+  select(2:ncol(elephant_data_w3)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data_w3)[2:ncol(elephant_data_w3)]
+colnames(elephant_matrix_w3) <- node_IDs
+rownames(elephant_matrix_w3) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix_w3 <- matrix(1, 120, 120) - elephant_matrix_w3
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix_w3) <- 0
+# Replace with NAs with 0s 
+inv_elephant_matrix_w3 <- replace_na(inv_elephant_matrix_w3, 0)
+# Now create the network
+elephant_graph_w3<- 
+graph_from_adjacency_matrix(inv_elephant_matrix_w3, mode = "undirected", weighted = T)
+
+```
+
+Backbone the networks 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_ew3_25 <- backbone_graph(alpha = 0.36, 
+                               simple = F, 
+                               g = elephant_graph_w3)
+enet_w3_25 <- backbone_ew3_25[[2]]
+# Keep 50% of the nodes 
+backbone_ew3_50 <- backbone_graph(alpha = 0.56, 
+                               simple = F, 
+                               g = elephant_graph_w3)
+enet_w3_50 <- backbone_ew3_50[[2]]
+
+```
+
+Removals for wave 3. 
+
+```{r}
+# Removals for the full network 
+removal_ed_w3_full <- decrease_efficiency(elephant_graph_w3)
+
+# Removals for the 25% network 
+removal_ed_w3_25 <- decrease_efficiency(enet_w3_25)
+
+# Removals for the 50% network
+removal_ed_w3_50 <- decrease_efficiency(enet_w3_50)
+
+```
+
+Let's look at the correlations: 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_ed_w3_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 3 - Elephant Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_ed_w3_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 3 - Elephant Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_ed_w3_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "bon", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 3 - Elephant Data - 25%")
+
+```
+
+The story here is similar: the importance of betweenness rises. But here degree remains important, even when we prune 75% of the edges. 
+
+Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_ed50_w3 <- removal_ed_w3_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+enet_w3_50_rems <- delete.vertices(enet_w3_50, V(enet_w3_50)[targeted_nodes_ed50_w3])
+
+# Network with centrality removals 
+central_nodes_ed50_w3 <- removal_ed_w3_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+enet_w3_central_rems50 <- delete.vertices(enet_w3_50, V(enet_w3_50)[central_nodes_ed50_w3])
+
+
+# Network with degree removals 
+degree_nodes_ed50_w3 <- removal_ed_w3_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w3_degree_rems50 <- delete.vertices(enet_w3_50, V(enet_w3_50)[degree_nodes_ed50_w3])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_ed25_w3 <- removal_ed_w3_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+enet_w3_25_rems <- delete.vertices(enet_w3_25, V(enet_w3_25)[targeted_nodes_ed25_w3])
+
+# Network with centrality removals 
+central_nodes_ed25_w3 <- removal_ed_w3_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+enet_w3_central_rems25 <- delete.vertices(enet_w3_25, V(enet_w3_25)[central_nodes_ed25_w3])
+
+
+# Network with degree removals 
+degree_nodes_ed25_w3 <- removal_ed_w3_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+ed_w3_degree_rems25 <- delete.vertices(enet_w3_25, V(enet_w3_25)[degree_nodes_ed25_w3])
+
+```
+
+Let's look at trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w3_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w3_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w3_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w3_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Elephant Data - Wave 3 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+We notice a very resilient network here, very close to what we notice in the full network. 
+
+Let's look at the network with 25% of the edges. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w3_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w3_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = enet_w3_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = ed_w3_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Elephant Data - Wave 3 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+Quite a vulnerable network here. Again, we notice that centrality-based removal hits the network more than targeted removal but the differences are quite small. 
+
+I am going to move on to the dolphin data. 
+
+## Dolphin Data 
+
+### Wave 1 
+
+Build the network. 
+
+```{r}
+# Import the data
+dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
+
+# Write function to return the graph from a wave
+# Function to plot the networks 
+dolphin_edgelist <- function(w, t) {
+  # Conditional statements for the waves 
+  if (w == 1) {
+    c <- "T2008"
+    title <- "Wave 1"
+  } else {
+    if(w ==2) {
+      c <- "T2010"
+      title <- "Wave 2"
+    } else {
+      if (w==3) {
+        c <- "T2012"
+        title <- "Wave 3"
+      } else {
+        if (w == 4) {
+          c <- "T2014"
+          title <- "Wave 4"
+        } else {
+          if (w == 5) {
+            c <- "T2016"
+            title <- "Wave 5"
+          } else {
+            c <- "T2018"
+            title <- "Wave 6"
+          }
+        }
+      }
+    }
+  }
+  # Take the wave 
+  edgelist <- dolphin_edge_lists %>% 
+    select(1,2, c, 9) %>% 
+    filter(!is.na(.[,3]) & .[,3] > t) %>% 
+    rename(weight = c, 
+           from = ID1, 
+           to = ID2)
+  
+  net <- graph_from_data_frame(edgelist, directed = FALSE)
+  return(net)
+}
+
+# Import the ID list data 
+# Contains removal information 
+
+id_list <- read_csv("Data/ID_list.csv")
+
+dolphin_w1 <- dolphin_edgelist(w = 1, 
+                               t = 0)
+```
+
+I need to change the function a bit for dolphins. 
+
+```{r}
+decrease_efficiency_dolphin <- function(g, w) {
+
+  # Get the original efficiency
+  og_geff <- inverse_efficiency(g)
+  # A matrix to store the data
+  removal_df <- matrix(NA, ncol = 6, nrow = length(V(g)))
+  # Inverse network 
+  net_mat <- as_adj(g, 
+                    attr = "weight",
+                    sparse = FALSE)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  for (i in 1:length(V(g))) {
+    vert <- V(g)[i]
+    deg <- degree(g)[vert]
+    ecent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+    bcent <- betweenness(g, directed = FALSE, weights = E(inv_network)$weight)[vert]
+    net_mat <- as_adj(g, attr = 'weight', sparse = F)
+    sum_weigths <- sum(net_mat[vert,], na.rm = T)
+    ng <- delete.vertices(g, vert)
+    eff <- inverse_efficiency(ng)
+    removal_df[i,] <- c(names(vert), 
+                        eff-og_geff,
+                        deg,
+                        sum_weigths, 
+                        ecent, 
+                        bcent)
+  }
+  
+  removal_df <- data.frame(removal_df)
+  names(removal_df) <- c("node_name", "change_efficiency",
+                         "degree", "sum_edge_weights", 
+                         "eigen_centrality", 
+                         "betweenness")
+  removal_df <- removal_df %>% 
+    mutate_at(vars(-("node_name")),as.numeric)
+  
+    # Conditional statements for the waves 
+    if (w == 1) {
+      c <- "T2008"
+      title <- "Wave 1"
+    } else {
+      if(w ==2) {
+        c <- "T2010"
+        title <- "Wave 2"
+      } else {
+        if (w==3) {
+          c <- "T2012"
+          title <- "Wave 3"
+        } else {
+          if (w == 4) {
+            c <- "T2014"
+            title <- "Wave 4"
+          } else {
+            if (w == 5) {
+              c <- "T2016"
+              title <- "Wave 5"
+            } else {
+              c <- "T2018"
+              title <- "Wave 6"
+            }
+          }
+        }
+      }
+    }
+    # Take the wave 
+    edgelist <- dolphin_edge_lists %>% 
+      select(1,2, c, 9) %>% 
+      filter(!is.na(.[,3]) & .[,3] > 0) %>% 
+      rename(weight = c, 
+             from = ID1, 
+             to = ID2)
+    related_df <- edgelist %>% 
+      group_by(from) %>% 
+      summarize(total_relatedness = sum(relatedness_coef>0, na.rm = T)) %>% 
+      select(from, total_relatedness) %>% 
+      rename(node_name = from)
+    
+    removal_df <- removal_df %>% 
+      left_join(related_df, by = "node_name")
+    
+    sex_df <- id_list %>% 
+      select(1, w+1, 12) %>% 
+      rename(node_name = Dolphin.ID) %>% 
+      mutate(sex_binary = case_when(Sex == "MALE" ~ 0, 
+                                    Sex == "FEMALE" ~ 1)) %>% 
+      select(node_name, sex_binary)
+    
+    removal_df <- removal_df %>% 
+      left_join(sex_df, by = "node_name") %>% 
+      mutate(perc_related = total_relatedness/degree) %>% select(-total_relatedness)
+    
+    
+    return(removal_df)
+
+}
+```
+
+Let's backbone the networks. 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_dw1_25 <- backbone_graph(alpha = 0.25, 
+                               simple = F, 
+                               g = dolphin_w1)
+dnet_w1_25 <- backbone_dw1_25[[2]]
+# Keep 50% of the nodes 
+backbone_dw1_50 <- backbone_graph(alpha = 0.4, 
+                               simple = F, 
+                               g = dolphin_w1)
+dnet_w1_50 <- backbone_dw1_50[[2]]
+
+```
+
+Let's look at removals. 
+
+```{r}
+# Removals for the full network 
+removal_dd_w1_full <- decrease_efficiency_dolphin(dolphin_w1, 
+                                                  w = 1)
+
+# Removals for the 25% network 
+removal_dd_w1_25 <- decrease_efficiency_dolphin(dnet_w1_25, 
+                                                w = 1)
+
+# Removals for the 50% network
+removal_dd_w1_50 <- decrease_efficiency_dolphin(dnet_w1_50, 
+                                                w = 1)
+
+```
+
+Let's look at the correlations. 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_dd_w1_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 1 - Dolphin Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_dd_w1_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 1 - Dolphin Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_dd_w1_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 1 - Dolphin Data - 25%")
+
+
+```
+
+The story is similar. Centrality becomes more important. 
+
+Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd50_w1 <- removal_dd_w1_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w1_50_rems <- delete.vertices(dnet_w1_50, V(dnet_w1_50)[targeted_nodes_dd50_w1])
+
+# Network with centrality removals 
+central_nodes_dd50_w1 <- removal_dd_w1_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w1_central_rems50 <- delete.vertices(dnet_w1_50, V(dnet_w1_50)[central_nodes_dd50_w1])
+
+
+# Network with degree removals 
+degree_nodes_dd50_w1 <- removal_dd_w1_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w1_degree_rems50 <- delete.vertices(dnet_w1_50, V(dnet_w1_50)[degree_nodes_dd50_w1])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd25_w1 <- removal_dd_w1_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w1_25_rems <- delete.vertices(dnet_w1_25, V(dnet_w1_25)[targeted_nodes_dd25_w1])
+
+# Network with centrality removals 
+central_nodes_dd25_w1 <- removal_dd_w1_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w1_central_rems25 <- delete.vertices(dnet_w1_25, V(dnet_w1_25)[central_nodes_dd25_w1])
+
+
+# Network with degree removals 
+degree_nodes_dd25_w1 <- removal_dd_w1_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w1_degree_rems25 <- delete.vertices(dnet_w1_25, V(dnet_w1_25)[degree_nodes_dd25_w1])
+
+```
+
+Let's see trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w1_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 1 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+We notice here that the trajectories for the networks with the removals are relatively similar. Though centrality based removal is consistently the worst. 
+
+Let's look at the trajectories of the 25% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w1_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w1_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 1 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+Degree and centrality based removal are the worst here. I'm surprised by the difference. 
+
+### Wave 2 
+
+Let's build the network. 
+
+```{r}
+dolphin_w2 <- dolphin_edgelist(w = 2, 
+                               t = 0)
+```
+
+Let's backbone the networks. 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_dw2_25 <- backbone_graph(alpha = 0.23, 
+                               simple = F, 
+                               g = dolphin_w2)
+dnet_w2_25 <- backbone_dw2_25[[2]]
+# Keep 50% of the nodes 
+backbone_dw2_50 <- backbone_graph(alpha = 0.42, 
+                               simple = F, 
+                               g = dolphin_w2)
+dnet_w2_50 <- backbone_dw2_50[[2]]
+
+```
+
+Let's look at removals. 
+
+```{r}
+# Removals for the full network 
+removal_dd_w2_full <- decrease_efficiency_dolphin(dolphin_w2, 
+                                                  w = 2)
+
+# Removals for the 25% network 
+removal_dd_w2_25 <- decrease_efficiency_dolphin(dnet_w2_25, 
+                                                w = 2)
+
+# Removals for the 50% network
+removal_dd_w2_50 <- decrease_efficiency_dolphin(dnet_w2_50, 
+                                                w = 2)
+
+```
+
+Let's look at the correlations. 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_dd_w2_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 2 - Dolphin Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_dd_w2_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 2 - Dolphin Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_dd_w2_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 2 - Dolphin Data - 25%")
+
+
+```
+
+The importance of betweenness here emerges but perhaps not quite so strinkingly as in the previous cases. 
+
+Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd50_w2 <- removal_dd_w2_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w2_50_rems <- delete.vertices(dnet_w2_50, V(dnet_w2_50)[targeted_nodes_dd50_w2])
+
+# Network with centrality removals 
+central_nodes_dd50_w2 <- removal_dd_w2_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w2_central_rems50 <- delete.vertices(dnet_w2_50, V(dnet_w2_50)[central_nodes_dd50_w2])
+
+
+# Network with degree removals 
+degree_nodes_dd50_w2 <- removal_dd_w2_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w2_degree_rems50 <- delete.vertices(dnet_w2_50, V(dnet_w2_50)[degree_nodes_dd50_w2])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd25_w2 <- removal_dd_w2_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w2_25_rems <- delete.vertices(dnet_w2_25, V(dnet_w2_25)[targeted_nodes_dd25_w2])
+
+# Network with centrality removals 
+central_nodes_dd25_w2 <- removal_dd_w2_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w2_central_rems25 <- delete.vertices(dnet_w2_25, V(dnet_w2_25)[central_nodes_dd25_w2])
+
+
+# Network with degree removals 
+degree_nodes_dd25_w2 <- removal_dd_w2_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w2_degree_rems25 <- delete.vertices(dnet_w2_25, V(dnet_w2_25)[degree_nodes_dd25_w2])
+
+```
+
+Let's see trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w2_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w2_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w2_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w2_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 2 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+A really resilient network here. Targeted removal seems to be best. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w2_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w2_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w2_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w2_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 2 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+Full and targeted very close on this pruned network with centrality emerging 
+
+### Wave 3
+
+Let's build the network. 
+
+```{r}
+dolphin_w3 <- dolphin_edgelist(w = 3, 
+                               t = 0)
+```
+
+Let's backbone the networks. 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_dw3_25 <- backbone_graph(alpha = 0.24, 
+                               simple = F, 
+                               g = dolphin_w3)
+dnet_w3_25 <- backbone_dw3_25[[2]]
+# Keep 50% of the nodes 
+backbone_dw3_50 <- backbone_graph(alpha = 0.44, 
+                               simple = F, 
+                               g = dolphin_w3)
+dnet_w3_50 <- backbone_dw3_50[[2]]
+
+```
+
+Let's look at removals. 
+
+```{r}
+# Removals for the full network 
+removal_dd_w3_full <- decrease_efficiency_dolphin(dolphin_w3, 
+                                                  w = 3)
+
+# Removals for the 25% network 
+removal_dd_w3_25 <- decrease_efficiency_dolphin(dnet_w3_25, 
+                                                w = 3)
+
+# Removals for the 50% network
+removal_dd_w3_50 <- decrease_efficiency_dolphin(dnet_w3_50, 
+                                                w = 3)
+
+```
+
+Let's look at the correlations. 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_dd_w3_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 3 - Dolphin Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_dd_w3_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 3 - Dolphin Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_dd_w3_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 3 - Dolphin Data - 25%")
+
+
+```
+
+The importance of betweenness here emerges but also not quite so strongly. Similar to last wave. 
+
+Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd50_w3 <- removal_dd_w3_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w3_50_rems <- delete.vertices(dnet_w3_50, V(dnet_w3_50)[targeted_nodes_dd50_w3])
+
+# Network with centrality removals 
+central_nodes_dd50_w3 <- removal_dd_w3_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w3_central_rems50 <- delete.vertices(dnet_w3_50, V(dnet_w3_50)[central_nodes_dd50_w3])
+
+
+# Network with degree removals 
+degree_nodes_dd50_w3 <- removal_dd_w3_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w3_degree_rems50 <- delete.vertices(dnet_w3_50, V(dnet_w3_50)[degree_nodes_dd50_w3])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd25_w3 <- removal_dd_w3_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w3_25_rems <- delete.vertices(dnet_w3_25, V(dnet_w3_25)[targeted_nodes_dd25_w3])
+
+# Network with centrality removals 
+central_nodes_dd25_w3 <- removal_dd_w3_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w3_central_rems25 <- delete.vertices(dnet_w3_25, V(dnet_w3_25)[central_nodes_dd25_w3])
+
+
+# Network with degree removals 
+degree_nodes_dd25_w3 <- removal_dd_w3_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w3_degree_rems25 <- delete.vertices(dnet_w3_25, V(dnet_w3_25)[degree_nodes_dd25_w3])
+
+```
+
+Let's see trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w3_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w3_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w3_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w3_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 3 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+Here, we notice that degree based removal really hurts the network, while centrality removal doesn't do much damage. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w3_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w3_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w3_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w3_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 3 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+The removal strategies all have similar effects. 
+
+### Wave 4 
+
+Let's build the network. 
+
+```{r}
+dolphin_w4 <- dolphin_edgelist(w = 4, 
+                               t = 0)
+```
+
+Let's backbone the networks. 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_dw4_25 <- backbone_graph(alpha = 0.26, 
+                               simple = F, 
+                               g = dolphin_w4)
+dnet_w4_25 <- backbone_dw4_25[[2]]
+# Keep 50% of the nodes 
+backbone_dw4_50 <- backbone_graph(alpha = 0.41, 
+                               simple = F, 
+                               g = dolphin_w4)
+dnet_w4_50 <- backbone_dw4_50[[2]]
+
+```
+
+Let's look at removals. 
+
+```{r}
+# Removals for the full network 
+removal_dd_w4_full <- decrease_efficiency_dolphin(dolphin_w4, 
+                                                  w = 4)
+
+# Removals for the 25% network 
+removal_dd_w4_25 <- decrease_efficiency_dolphin(dnet_w4_25, 
+                                                w = 4)
+
+# Removals for the 50% network
+removal_dd_w4_50 <- decrease_efficiency_dolphin(dnet_w4_50, 
+                                                w = 4)
+
+```
+
+Let's look at the correlations. 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_dd_w4_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 4 - Dolphin Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_dd_w4_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 4 - Dolphin Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_dd_w4_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 4 - Dolphin Data - 25%")
+
+
+```
+
+The importance of betweenness here emerges but also not quite so strongly. Similar to the last two waves
+
+Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd50_w4 <- removal_dd_w4_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w4_50_rems <- delete.vertices(dnet_w4_50, V(dnet_w4_50)[targeted_nodes_dd50_w4])
+
+# Network with centrality removals 
+central_nodes_dd50_w4 <- removal_dd_w4_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w4_central_rems50 <- delete.vertices(dnet_w4_50, V(dnet_w4_50)[central_nodes_dd50_w4])
+
+
+# Network with degree removals 
+degree_nodes_dd50_w4 <- removal_dd_w4_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w4_degree_rems50 <- delete.vertices(dnet_w4_50, V(dnet_w4_50)[degree_nodes_dd50_w4])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd25_w4 <- removal_dd_w4_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w4_25_rems <- delete.vertices(dnet_w4_25, V(dnet_w4_25)[targeted_nodes_dd25_w4])
+
+# Network with centrality removals 
+central_nodes_dd25_w4 <- removal_dd_w4_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w4_central_rems25 <- delete.vertices(dnet_w4_25, V(dnet_w4_25)[central_nodes_dd25_w4])
+
+
+# Network with degree removals 
+degree_nodes_dd25_w4 <- removal_dd_w4_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w4_degree_rems25 <- delete.vertices(dnet_w4_25, V(dnet_w4_25)[degree_nodes_dd25_w4])
+
+```
+
+Let's see trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w4_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w4_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w4_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w4_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 4 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+Here, we notice that centrality-based removal and targeted removal have a similar effect. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w4_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w4_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w4_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w4_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 4 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+A resilient network here but degree-based removals seems to do the most damage. 
+
+### Wave 5 
+
+Let's build the network. 
+
+```{r}
+dolphin_w5 <- dolphin_edgelist(w = 5, 
+                               t = 0)
+```
+
+Let's backbone the networks. 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_dw5_25 <- backbone_graph(alpha = 0.25, 
+                               simple = F, 
+                               g = dolphin_w5)
+dnet_w5_25 <- backbone_dw5_25[[2]]
+# Keep 50% of the nodes 
+backbone_dw5_50 <- backbone_graph(alpha = 0.42, 
+                               simple = F, 
+                               g = dolphin_w5)
+dnet_w5_50 <- backbone_dw5_50[[2]]
+
+```
+
+Let's look at removals. 
+
+```{r}
+# Removals for the full network 
+removal_dd_w5_full <- decrease_efficiency_dolphin(dolphin_w5, 
+                                                  w = 5)
+
+# Removals for the 25% network 
+removal_dd_w5_25 <- decrease_efficiency_dolphin(dnet_w5_25, 
+                                                w = 5)
+
+# Removals for the 50% network
+removal_dd_w5_50 <- decrease_efficiency_dolphin(dnet_w5_50, 
+                                                w = 5)
+
+```
+
+Let's look at the correlations. 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_dd_w5_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 5 - Dolphin Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_dd_w5_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 5 - Dolphin Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_dd_w5_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 5 - Dolphin Data - 25%")
+
+
+```
+
+Ironically, the importance of betweenness dips when we remove 50% of the edges but picks back up when we only keep 25% of them.  
+
+Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd50_w5 <- removal_dd_w5_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w5_50_rems <- delete.vertices(dnet_w5_50, V(dnet_w5_50)[targeted_nodes_dd50_w5])
+
+# Network with centrality removals 
+central_nodes_dd50_w5 <- removal_dd_w5_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w5_central_rems50 <- delete.vertices(dnet_w5_50, V(dnet_w5_50)[central_nodes_dd50_w5])
+
+
+# Network with degree removals 
+degree_nodes_dd50_w5 <- removal_dd_w5_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w5_degree_rems50 <- delete.vertices(dnet_w5_50, V(dnet_w5_50)[degree_nodes_dd50_w5])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd25_w5 <- removal_dd_w5_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w5_25_rems <- delete.vertices(dnet_w5_25, V(dnet_w5_25)[targeted_nodes_dd25_w5])
+
+# Network with centrality removals 
+central_nodes_dd25_w5 <- removal_dd_w5_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w5_central_rems25 <- delete.vertices(dnet_w5_25, V(dnet_w5_25)[central_nodes_dd25_w5])
+
+
+# Network with degree removals 
+degree_nodes_dd25_w5 <- removal_dd_w5_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w5_degree_rems25 <- delete.vertices(dnet_w5_25, V(dnet_w5_25)[degree_nodes_dd25_w5])
+
+```
+
+Let's see trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w5_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w5_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w5_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w5_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 5 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+Centrality based removal seems to hurt the network the most.   
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w5_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w5_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w5_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w5_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 5 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+Centrality-based removal being the most influential here by far! 
+
+### Wave 6 
+
+Let's build the network. 
+
+```{r}
+dolphin_w6 <- dolphin_edgelist(w = 6, 
+                               t = 0)
+```
+
+Let's backbone the networks. 
+
+```{r}
+# Keep only 25% of the nodes
+backbone_dw6_25 <- backbone_graph(alpha = 0.25, 
+                               simple = F, 
+                               g = dolphin_w6)
+dnet_w6_25 <- backbone_dw6_25[[2]]
+# Keep 50% of the nodes 
+backbone_dw6_50 <- backbone_graph(alpha = 0.42, 
+                               simple = F, 
+                               g = dolphin_w6)
+dnet_w6_50 <- backbone_dw6_50[[2]]
+
+```
+
+Let's look at removals. 
+
+```{r}
+# Removals for the full network 
+removal_dd_w6_full <- decrease_efficiency_dolphin(dolphin_w6, 
+                                                  w = 6)
+
+# Removals for the 25% network 
+removal_dd_w6_25 <- decrease_efficiency_dolphin(dnet_w6_25, 
+                                                w = 6)
+
+# Removals for the 50% network
+removal_dd_w6_50 <- decrease_efficiency_dolphin(dnet_w6_50, 
+                                                w = 6)
+
+```
+
+Let's look at the correlations. 
+
+```{r}
+# Correlation plot full
+M <- cor(removal_dd_w6_full[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 6 - Dolphin Data - Full")
+
+# Correlation plot 50%
+M <- cor(removal_dd_w6_50[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw", "mot", "chld")
+corrplot(M, method = "number", title = "Wave 6 - Dolphin Data - 50%")
+
+# Correlation plot 25%
+M <- cor(removal_dd_w6_25[,-1])
+colnames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+rownames(M) <- c("ceff", "deg", "sew", "ecent", "betw",  "mot", "chld")
+corrplot(M, method = "number", title = "Wave 6 - Dolphin Data - 25%")
+
+
+```
+
+Centrality becomes increasingly important. 
+
+Let's go through the removals and see what happens to diffusion trajectories. 
+
+```{r}
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd50_w6 <- removal_dd_w6_50 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w6_50_rems <- delete.vertices(dnet_w6_50, V(dnet_w6_50)[targeted_nodes_dd50_w6])
+
+# Network with centrality removals 
+central_nodes_dd50_w6 <- removal_dd_w6_50 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w6_central_rems50 <- delete.vertices(dnet_w6_50, V(dnet_w6_50)[central_nodes_dd50_w6])
+
+
+# Network with degree removals 
+degree_nodes_dd50_w6 <- removal_dd_w6_50 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w6_degree_rems50 <- delete.vertices(dnet_w6_50, V(dnet_w6_50)[degree_nodes_dd50_w6])
+
+# Network with targeted removals 
+# Pull the five most influential nodes
+targeted_nodes_dd25_w6 <- removal_dd_w6_25 %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+dnet_w6_25_rems <- delete.vertices(dnet_w6_25, V(dnet_w6_25)[targeted_nodes_dd25_w6])
+
+# Network with centrality removals 
+central_nodes_dd25_w6 <- removal_dd_w6_25 %>% 
+  arrange(desc(betweenness)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dnet_w6_central_rems25 <- delete.vertices(dnet_w6_25, V(dnet_w6_25)[central_nodes_dd25_w6])
+
+
+# Network with degree removals 
+degree_nodes_dd25_w6 <- removal_dd_w6_25 %>% 
+  arrange(desc(degree)) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest centrality 
+dd_w6_degree_rems25 <- delete.vertices(dnet_w6_25, V(dnet_w6_25)[degree_nodes_dd25_w6])
+
+```
+
+Let's see trajectories of diffusion for the 50% network. 
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w6_50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w6_50_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w6_central_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w6_degree_rems50, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 6 - 50% of the nodes") + 
+  theme_bw() 
+
+```
+
+Even though degree-based removal seems to start more slowly, all removal strategies seem to perform similarly.   
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w6_25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With highest impact removals
+highest_impact_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w6_25_rems, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With centrality-based removals 
+highest_centrality_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dnet_w6_central_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+# With degree-based removals
+highest_degree_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dd_w6_degree_rems25, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "full")
+
+summary_hi_rems <- highest_impact_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "targeted")
+
+summary_centrality_rems <- highest_centrality_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "centrality")
+
+summary_degree_rems <- highest_degree_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = avg + sd(proportion)*1.96, 
+            lower = avg - sd(proportion)*1.96) %>% 
+  mutate(type = "degree")
+
+complete_contagion <- rbind(summary_nr,
+                            summary_hi_rems, 
+                            summary_centrality_rems,
+                            summary_degree_rems)
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin Data - Wave 6 - 25% of the nodes") + 
+  theme_bw() 
+
+```
+
+Degree-based removal is the most influential here. Targeted based removal does similar than the full network. 
+
+
+
+
+
+
+
+
+
+

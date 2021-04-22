@@ -1,0 +1,783 @@
+---
+title: "Dolphin Data Analysis"
+author: "Nicolas Restrepo"
+date: "2/8/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction 
+
+```{r}
+library(tidyverse)
+library(igraph)
+library(brainGraph)
+library(patchwork)
+library(bayestestR)
+```
+
+Here, I am going to be approaching efficiency and diffusion in the dolphin networks using a more fine-tuned approach. This approach consists of taking into account the weights of the edges so that we do not actually have to backbone the networks, saving us the pitfall of discarding data. I will also use the removal data we have to explore how this affects the features of the static networks we have available. 
+
+## Efficiency
+
+The measure of global efficiency is is the average of the inverse distances between all nodes in a network. When finding the shortest path between two nodes in an association matrix, however, there is room for error. The weight of the tie might be interpreted as distance and, thus, strong links would imply that agents are far apart. To enmend this I will use the inverse matrix to find the distances. 
+
+In this example I am going to work with wave 2 of the dolphin data. 
+
+```{r}
+set.seed(76)
+# Import the data
+dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
+
+# Write function to return the graph from a wave
+# Function to plot the networks 
+dolphin_edgelist <- function(w, t) {
+  # Conditional statements for the waves 
+  if (w == 1) {
+    c <- "T2008"
+    title <- "Wave 1"
+  } else {
+    if(w ==2) {
+      c <- "T2010"
+      title <- "Wave 2"
+    } else {
+      if (w==3) {
+        c <- "T2012"
+        title <- "Wave 3"
+      } else {
+        if (w == 4) {
+          c <- "T2014"
+          title <- "Wave 4"
+        } else {
+          if (w == 5) {
+            c <- "T2016"
+            title <- "Wave 5"
+          } else {
+            c <- "T2018"
+            title <- "Wave 6"
+          }
+        }
+      }
+    }
+  }
+  # Take the wave 
+  edgelist <- dolphin_edge_lists %>% 
+    select(1,2, c, 9) %>% 
+    filter(!is.na(.[,3]) & .[,3] >= t) %>% 
+    rename(weight = c, 
+           from = ID1, 
+           to = ID2)
+  
+  net <- graph_from_data_frame(edgelist, directed = FALSE)
+  return(net)
+}
+
+# Get the second wave 
+dolphin_net_w2 <- dolphin_edgelist(w = 2, 
+                                   t = 0)
+
+# Turn it into an adjacency matrix 
+dolphin_mat_w2 <- as_adj(dolphin_net_w2,
+                         attr = 'weight', 
+                         sparse = F)
+# Get the inverse matrix 
+# Make a copy
+dolphin_mat_inv <- dolphin_mat_w2
+
+# Get the edges that are above 0 
+edges <- which(dolphin_mat_inv > 0)
+
+# Now invert those 
+dolphin_mat_inv[edges] <- 1 - dolphin_mat_inv[edges]
+
+# Populate the diagonal with 0s
+diag(dolphin_mat_inv) <- 0
+
+# Create the new graph 
+dolphin_net_inv <- graph_from_adjacency_matrix(dolphin_mat_inv, 
+                                   weighted = T, 
+                                   mode = 'undirected')
+
+# Our function for efficiency after removal
+efficiency_after_random_removal <- function(g, reps, num_removals) {
+  # placeholder 
+  efficiencies <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    rmv <- sample(1:vcount(g), num_removals)
+    ng <- delete.vertices(g,rmv)
+    D <- distances(ng, 
+               weights = E(ng)$weight)
+    D <- D + 1 
+    diag(D) <- 0
+    Nv <- nrow(D)
+    Dinv <- 1/D
+    eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+    geff <- sum(eff)/length(eff)
+    efficiencies[i] <- geff
+  }
+  avg_eff <- mean(efficiencies)
+  sd_eff <- sd(efficiencies)
+  upper <- avg_eff + 1.96*sd_eff
+  lower <- avg_eff - 1.96*sd_eff
+  return(c(avg_eff = avg_eff, 
+           upper = upper, 
+           lower = lower, 
+           removals = num_removals))
+}
+
+# Dataset for eff at different levels of removal
+dolphin_rr_df <- map_df(c(1:30), 
+                    efficiency_after_random_removal, 
+                        g=dolphin_net_inv, 
+                        reps = 100)
+
+dolphin_rr_df %>% 
+  ggplot(aes(x = removals, y = avg_eff)) +
+  geom_line(color = "gray") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + 
+  theme_light() + 
+  labs(title = "Global efficiency after random removal", 
+       subtitle = "Dolphin Data - Wave 2",
+       x = "Removals", 
+       y = "Efficiency")
+
+
+```
+
+We notice the same pattern as we did in the elephant data: the variances increases dramatically with random removal but we cannot speak of a clear central tendency.
+
+Let's look at centrality-based removal. The difference here is that I am going to consider efficiency using the reverse-coded graph but I will assess centrality using our original network. 
+
+```{r}
+# Write a function for removal of central nodes
+efficiency_after_centrality_removal <- function(g, reps, num_removals, cent_scores) {
+  # placeholder 
+  efficiencies <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    centrality <- cent_scores 
+    centrality <- sort(centrality, decreasing = T) 
+    central_nodes <- names(centrality)
+    ng <- delete.vertices(g,central_nodes[1:num_removals])
+    D <- distances(ng, 
+               weights = E(ng)$weight)
+    D <- D + 1 
+    diag(D) <- 0
+    Nv <- nrow(D)
+    Dinv <- 1/D
+    eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+    geff <- sum(eff)/length(eff)
+    efficiencies[i] <- geff
+  }
+  avg_eff <- mean(efficiencies)
+  sd_eff <- sd(efficiencies)
+  upper <- avg_eff + 1.96*sd_eff
+  lower <- avg_eff - 1.96*sd_eff
+  return(c(avg_eff = avg_eff, 
+           upper = upper, 
+           lower = lower, 
+           removals = num_removals))
+}
+
+# Dataset for eff at different levels of removal
+dolphin_rr_df <- map_df(c(1:5), 
+                    efficiency_after_centrality_removal, 
+                        g=dolphin_net_inv, 
+                        reps = 100, 
+                    cent_scores = eigen_centrality(dolphin_net_w2)$vector)
+
+dolphin_rr_df %>% 
+  ggplot(aes(x = removals, y = avg_eff)) +
+  geom_line(color = "gray") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) + 
+  theme_bw() + 
+  labs(title = "Global efficiency after centrality removal", 
+       subtitle = "Dolphin Data - Wave 2",
+       x = "Removals", 
+       y = "Efficiency")
+
+```
+
+There is an almost linear decline, much clearer than in our elephant data. 
+
+## Weighted Diffusion 
+
+I want to simulate diffusion but in a way that can incorporate what we know about the edge weights. In the current simulation, I let each edge add a probability of transmission equal to its weight (i.e. $\frac{weight}{1}$. The sum of these fractions for all edges that an agent j has represents its probability of acquiring the behavior in a given turn. 
+
+```{r}
+set.seed(76)
+# Contagion model from Acerbi et al (2020)
+info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+  adjm <- get.adjacency(net, 
+                        sparse = F, 
+                        attr = "weight")
+  
+  # Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+  # adjm_bool <- adjm > 0
+  
+  # Set number of individuals based adjacency matrix
+  N <- vcount(net)
+  
+  # Create a vector indicating possession of info and set one entry to TRUE
+  info <- rep(FALSE, N)
+  info[sample(x = N, size = 1)] <- TRUE
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      nei <- adjm[i,] > 0
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+
+# Contagion with no removal
+d_sim_nr <- info_contagion(dolphin_net_w2, 
+                           rewire = F, 
+                           e = 1, 
+                           r_max = 500)
+
+p1 <- d_sim_nr %>% 
+  ggplot(aes(x = time, y = proportion)) +
+  geom_line() + 
+  theme_light() + 
+  labs(title = "No removal")
+
+# Now some random removal
+rmv <- sample(1:vcount(dolphin_net_w2), 10)
+ng <- delete.vertices(dolphin_net_w2, rmv)
+
+
+# Contagion with random removal
+d_sim_r <- info_contagion(ng, 
+                           rewire = F, 
+                           e = 1, 
+                           r_max = 500)
+
+p2 <- d_sim_r %>% 
+  ggplot(aes(x = time, y = proportion)) +
+  geom_line() + 
+  theme_bw() + 
+  labs(title = "10 nodes removed")
+
+p1 + p2
+
+
+```
+
+We see that the spread is slower when nodes have been removed. Let's repeat this process for several times and see how both diffusion trajectories compare on average. 
+
+I am going to take the turn where the simulation without removal reaches the maximum - i.e. when the proportion equals 1. I am going to do the same for the simulation with the removal, and I will subtract the latter from the former. Positive values then will indicate that the network without removals was more efficient at reaching all nodes and vice-versa. 
+
+```{r}
+turn_reached_max <- function(ev, g, reps, turns, num_removals) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                          rewire = F, 
+                          e = ev, 
+                          r_max = turns)
+    ttm <- sim$time_to_max[1]
+  
+    # Now some random removal
+    rmv <- sample(1:vcount(g), num_removals)
+    ng <- delete.vertices(g, rmv)
+    sim_r <- info_contagion(ng, 
+                            rewire = F, 
+                            e = ev, 
+                            r_max = turns)
+    ttmr <- sim_r$time_to_max[1]
+    
+    values[i] <- ttm-ttmr
+  }
+  return(values)
+}
+
+diffs_10_rems <- turn_reached_max(ev = 1, 
+                 g = dolphin_net_w2, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 10)
+diffs_20_rems <- turn_reached_max(ev = 1, 
+                 g = dolphin_net_w2, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 20)
+diffs_5_rems <- turn_reached_max(ev = 1, 
+                 g = dolphin_net_w2, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 5)
+
+ttm_dolphin <- tibble(ratios = c(diffs_5_rems, diffs_10_rems, diffs_20_rems), 
+                        removals = rep(c(5, 10, 20), each = 100)) %>% 
+  mutate(removals = as.factor(removals))
+
+ttm_dolphin %>% 
+  ggplot(aes(x = ratios, fill = removals)) +
+  geom_density(alpha = 0.3) + 
+  geom_vline(xintercept = 1, linetype = 3) + 
+  theme_bw() + 
+  labs(title = "Differences between turn to reach maximum", 
+       subtitle = "Dolphin data",
+       x = "Differences")
+
+```
+
+As in previous analyses, we notice there is not a clear pattern here. Just from these distributions, it is difficult to discern whether random removal leads to quicker or more sluggish trajectories of transmission. 
+
+Let us examine these differences when we conduct centrality-based removal. 
+
+```{r}
+turn_reached_max_centrality <- function(ev, g, reps, turns, num_removals) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                          rewire = F, 
+                          e = ev, 
+                          r_max = turns)
+    ttm <- sim$time_to_max[1]
+  
+    # Now some centrality removal
+    centrality <- eigen_centrality(g)$vector 
+    centrality <- sort(centrality, decreasing = T) 
+    central_nodes <- names(centrality)
+    ng <- delete.vertices(g,central_nodes[1:num_removals])
+    sim_r <- info_contagion(ng, 
+                            rewire = F, 
+                            e = ev, 
+                            r_max = turns)
+    ttmr <- sim_r$time_to_max[1]
+    
+    values[i] <- ttm-ttmr
+  }
+  return(values)
+}
+
+diffs_5_rems <- turn_reached_max_centrality(ev = 1, 
+                 g = dolphin_net_w2, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 5)
+diffs_2_rems <- turn_reached_max_centrality(ev = 1, 
+                 g = dolphin_net_w2, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 2)
+diffs_1_rems <- turn_reached_max_centrality(ev = 1, 
+                 g = dolphin_net_w2, 
+                 reps = 100, 
+                 turns = 500, 
+                 num_removals = 1)
+
+aucs_dolphins <- tibble(ratios = c(diffs_5_rems, diffs_1_rems, diffs_2_rems), 
+                        removals = rep(c(5, 1, 2), each = 100)) %>% 
+  mutate(removals = as.factor(removals))
+
+aucs_dolphins %>% 
+  ggplot(aes(x = ratios, fill = removals)) +
+  geom_density(alpha = 0.3) + 
+  geom_vline(xintercept = 1, linetype = 3) + 
+  theme_bw() + 
+  labs(title = "Differences between turn to reach maximum", 
+       subtitle = "Dolphin data - Centrality Removal",
+       x = "Differences")
+
+```
+
+The distributions here are again centered around zero. Though there seems to be more mass on positive values - meaning removals led to slower diffusion - the trend is certainly not clear enough to make an argument. 
+
+## Data-Based Removal 
+
+We have good information about what kind of nodes we leave from one wave to another in out dolphin data. Let's see how efficiency and diffusion patterns are affected then we remove the nodes that actually left the network. I will do this for all waves except for the last one, where we have no information about the further removals. 
+
+I will document each step so what I am doing is clear. I will begin with wave 1. 
+
+### Wave 1 
+
+```{r}
+# Import the ID list data 
+# Contains removal information 
+
+id_list <- read_csv("Data/ID_list.csv")
+
+head(id_list)
+```
+
+We have useful data about what nodes appear in each wave. Now, let's see how many that were in wave 1 did not show up in wave 2. 
+
+```{r}
+# Get a vector of the nodes that were removed
+removed_nodes <- id_list %>% 
+  select(1:3) %>% 
+  filter(!is.na(T2008)&is.na(T2010)) %>% 
+  pull(Dolphin.ID) 
+
+# Write function to get efficiency of inverse matrix 
+inverse_efficiency <- function(g) {
+# Turn it into an adjacency matrix 
+net_mat <- as_adj(g,
+                  attr = 'weight', 
+                  sparse = F)
+# Get the inverse matrix 
+mat_inv <- net_mat 
+edges <- which(mat_inv > 0)
+mat_inv[edges] <- 1 - mat_inv[edges]
+# Populate the diagonal with 0s
+diag(mat_inv) <- 0
+
+# Create the new graph 
+net_inv <- graph_from_adjacency_matrix(mat_inv, 
+                                       weighted = T, 
+                                       mode = 'undirected')
+    D <- distances(net_inv, 
+               weights = E(net_inv)$weight)
+    D <- D + 1 
+    diag(D) <- 0
+    Nv <- nrow(D)
+    Dinv <- 1/D
+    eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+    geff <- sum(eff)/length(eff)
+    
+    return(geff)
+}
+
+# Get the graph for wave 1 
+dolphin_w1 <- dolphin_edgelist(w = 1, 
+                               t = 0)
+
+# Record different efficiencies after systematic removal
+
+effs_data_removal_w1 <- matrix(NA, nrow = length(removed_nodes)+1, ncol = 2 )
+
+for (i in 0:7) {
+  if (i == 0) {
+    eff <- inverse_efficiency(dolphin_w1)
+    effs_data_removal_w1[i+1,] <- c(i, eff)
+  } else {
+    ng <- delete.vertices(dolphin_w1, removed_nodes[1:i])
+    eff <- inverse_efficiency(ng)
+    effs_data_removal_w1[i+1,] <- c(i, eff)
+  }
+}
+
+p1 <- data.frame(effs_data_removal_w1) %>% 
+  rename(removals = X1, 
+         efficiency = X2) %>% 
+  ggplot(aes(x = removals, y = efficiency)) +
+  geom_line(color = "gray") +
+  geom_point() + 
+  theme_bw() + 
+  labs(title = "Global efficiency after data removal", 
+       subtitle = "Wave 1", 
+       x = "Removals", 
+       y = "Efficiency")
+p1 
+```
+
+Okay, this plot shows that if we remove the nodes that actually left the network from wave 1 to 2, the global efficiency slightly improves. The improvement, however, is very small. 
+
+I am going to write a function to do this iteratively for each wave. 
+
+```{r}
+efficiency_data_removal <- function(wave) {
+
+# Get the network we need 
+  dnet <- dolphin_edgelist(w = wave, 
+                           t = 0)
+# Get a vector of the nodes that were removed
+removed_nodes <- id_list %>% 
+  select(1,wave+1,wave+2) %>% 
+  filter(!is.na(.[,2])&is.na(.[,3])) %>% 
+  pull(Dolphin.ID) 
+
+# Record different efficiencies after systematic removal
+
+effs_data_removal <- matrix(NA, nrow = length(removed_nodes)+1, ncol = 2 )
+
+for (i in 0:length(removed_nodes)) {
+  if (i == 0) {
+    eff <- inverse_efficiency(dnet)
+    effs_data_removal[i+1,] <- c(i, eff)
+  } else {
+    ng <- delete.vertices(dnet, removed_nodes[1:i])
+    eff <- inverse_efficiency(ng)
+    effs_data_removal[i+1,] <- c(i, eff)
+  }
+}
+
+return(data.frame(effs_data_removal) %>% 
+         rename(removals = X1, 
+         efficiency = X2))
+
+}
+
+p2 <- efficiency_data_removal(wave = 2) %>% 
+  ggplot(aes(x = removals, y = efficiency)) +
+  geom_line(color = "gray") +
+  geom_point() + 
+  theme_bw() + 
+  labs(title = "Wave 2", 
+       x = "Removals", 
+       y = "Efficiency")
+p3 <- efficiency_data_removal(wave = 3) %>% 
+  ggplot(aes(x = removals, y = efficiency)) +
+  geom_line(color = "gray") +
+  geom_point() + 
+  theme_bw() + 
+  labs(title = "Wave 3", 
+       x = "Removals", 
+       y = "Efficiency")
+p4 <- efficiency_data_removal(wave = 4) %>% 
+  ggplot(aes(x = removals, y = efficiency)) +
+  geom_line(color = "gray") +
+  geom_point() + 
+  theme_bw() + 
+  labs(title = "Wave 4", 
+       x = "Removals", 
+       y = "Efficiency")
+p5 <- efficiency_data_removal(wave = 5) %>% 
+  ggplot(aes(x = removals, y = efficiency)) +
+  geom_line(color = "gray") +
+  geom_point() + 
+  theme_bw() + 
+  labs(title = "Wave 5", 
+       x = "Removals", 
+       y = "Efficiency")
+
+(p2 | p3) / (p4 | p5) 
+
+```
+
+We notice that the story across waves is quite similar: there is a slight increase in global efficiency as we removed the nodes who actually left the network. 
+
+I think the issue we need to explore is what sort of edge removal results in less efficient networks. We might start from the result and work backwards to see if we can infer any patterns. 
+
+## Exploration of Removals 
+
+In this section, I am going to do that. I am going to take one network and remove five nodes, in such a way that I can lower the efficiency as much as possible. Then, I am going to see if there are any shared features amid the nodes that get removed.
+
+First let me write a function, that when given a graph, will tell me how removing each vertex will affect the graph's efficiency. 
+
+```{r}
+
+decrease_efficiency <- function(g) {
+# Get the original efficiency
+og_geff <- inverse_efficiency(g)
+# A matrix to store the data
+removal_df <- matrix(NA, ncol = 5, nrow = length(V(g)))
+
+for (i in 1:length(V(g))) {
+  vert <- V(g)[i]
+  deg <- degree(g)[vert]
+  cent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+  net_mat <- as_adj(g, attr = 'weight', sparse = F)
+  sum_weigths <- sum(net_mat[vert,])
+  ng <- delete.vertices(g, vert)
+  eff <- inverse_efficiency(ng)
+  removal_df[i,] <- c(names(vert), eff-og_geff, deg, cent, sum_weigths)
+}
+
+removal_df <- data.frame(removal_df)
+names(removal_df) <- c("vertex", "change_efficiency",
+                       "degree", "centrality", "sum_edge_weights")
+
+return(removal_df)
+}
+
+removal_w1_first <- decrease_efficiency(dolphin_w1)
+
+```
+
+Let's examine these data a bit before we move forward. 
+
+```{r}
+removal_w1_first %>% 
+  mutate(centrality = as.numeric(centrality), 
+         change_efficiency = as.numeric(change_efficiency)) %>% 
+  ggplot(aes(x= centrality, y = change_efficiency)) +
+  geom_point(alpha = 0.7, size = 0.5) + 
+  theme_minimal() + 
+  labs(title = "Change in efficiency and Centrality", 
+       subtitle = "Dolphin Data - Wave 1",
+       y = "Change in efficiency", 
+       x = "Centrality")
+  
+```
+
+We notice a rather interesting pattern. Most node removals have roughly the same effect, regardless of their centrality. Except one that has an disproportionate effect when removed. 
+
+```{r}
+removal_w1_first %>% 
+  mutate(sum_edge_weights = as.numeric(sum_edge_weights), 
+         change_efficiency = as.numeric(change_efficiency)) %>% 
+  ggplot(aes(x= sum_edge_weights, y = change_efficiency)) +
+  geom_point(alpha = 0.7, size = 0.5) + 
+  theme_minimal() + 
+  labs(title = "Change in efficiency and edge weights", 
+       y = "Change in efficiency", 
+       x = "Sum of edge weights")
+
+```
+
+We notice the same pattern when we look at the sum of edge weights. 
+
+Let's remove that node and then see what the other best one would be. 
+
+```{r}
+g_after_first <- delete.vertices(dolphin_w1, V(dolphin_w1)[1])
+
+removal_w1_second <- decrease_efficiency(g_after_first)
+
+which.max(removal_w1_second$change_efficiency)
+```
+
+We see that it's node 35, which is not particularly central and doesn't have a lot of strong edges linking it to other agents. Let's remove it. 
+
+```{r}
+g_after_second <- delete.vertices(g_after_first, V(g_after_first)[35])
+removal_w1_third <- decrease_efficiency(g_after_second)
+which.max(removal_w1_third$change_efficiency)
+```
+
+The first one again. I am going to repeat this process until I reach five deletions. Then, I will compare the structures. 
+
+```{r}
+g_after_third <- delete.vertices(g_after_second, V(g_after_second)[1])
+removal_w1_fourth <- decrease_efficiency(g_after_third)
+which.max(removal_w1_fourth$change_efficiency)
+```
+
+```{r}
+g_after_fourth <- delete.vertices(g_after_third, V(g_after_third)[30])
+removal_w1_fifth <- decrease_efficiency(g_after_fourth)
+which.max(removal_w1_fifth$change_efficiency)
+```
+
+```{r}
+g_all_removals <- delete.vertices(g_after_fourth, V(g_after_fourth)[62])
+```
+
+```{r}
+set.seed(76)
+turn_reached_max_decrease <- function(ev, g, g2, reps, turns) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                          rewire = F, 
+                          e = ev, 
+                          r_max = turns)
+    ttm <- sim$time_to_max[1]
+  
+    # Now some centrality removal
+    sim_r <- info_contagion(g2, 
+                            rewire = F, 
+                            e = ev, 
+                            r_max = turns)
+    ttmr <- sim_r$time_to_max[1]
+    
+    values[i] <- ttm-ttmr
+  }
+  return(values)
+}
+
+diff_max_decrease_w1 <- turn_reached_max_decrease(ev =1, 
+                          g = dolphin_w1, 
+                          g2 = g_all_removals, 
+                          reps = 100, 
+                          turns = 500)
+tibble(run = 1:100, 
+       difference = diff_max_decrease_w1) %>% 
+  ggplot(aes(x = difference)) + 
+  geom_density(alpha = 0.3)
+```
+
+```{r}
+no_removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = dolphin_w1, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+removals_contagion <- map_df(c(1:100), 
+       info_contagion, 
+       net = g_all_removals, 
+       rewire = F, 
+       r_max = 500, 
+       e =1 )
+
+summary_nr <- no_removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = max(proportion), 
+            lower = min(proportion)) %>% 
+  mutate(type = "Full Network")
+
+summary_rem <- removals_contagion %>% 
+  group_by(time) %>% 
+  summarise(avg = mean(proportion), 
+            upper = max(proportion), 
+            lower = min(proportion)) %>% 
+  mutate(type = "Removed")
+
+complete_contagion <- rbind(summary_nr, 
+                            summary_rem)
+
+complete_contagion %>% 
+  ggplot(aes(x = time, y = avg, fill = type)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper, fill= type), alpha = 0.2) + 
+  geom_line(size = 0.5, aes(color = type)) + 
+  labs(x = "Time", 
+       y = "Proportion", 
+       title = "Contagion simulations", 
+       subtitle = "Dolphin data after 5 removals") + 
+   ylim(c(0,1)) +
+  theme_bw() 
+```
+
+The structure after these targeted removals is not as efficient in transmitting culture across all its nodes, especially towards the later time-steps of the simulation. We got this after 5 removals, which I think is consequential given how robust these structures are to node removal in general. 
+
+## What's next? 
+
+What I am interested in exploring is: what do these nodes that have a disproportionate effect on global efficiency have in common? It doesn't seem to be betweeness centrality or the sum of their edge weights. I am interested in whether the similarities they might have stay constant across waves, and especially across species. That, I think, is a very interesting path of inquiry. 
