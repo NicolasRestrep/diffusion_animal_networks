@@ -30,7 +30,7 @@ Let's build the network.
 
 ```{r}
 # Import the data 
-elephant_data <- read_csv("Data/dist.matrix.t1.csv")
+elephant_data <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/dist.matrix.t1.csv")
 # Transform data into square matrix
 elephant_matrix <- elephant_data %>% 
   select(2:ncol(elephant_data)) %>% 
@@ -168,7 +168,7 @@ info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
       # Proceed if there is at least one neighbour
       if(sum(nei) > 0){
         # Simple contagion for e = 1 and complex contagion for e = 2
-        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/sum(nei))^e){
           info[i] <- TRUE
         }
       }
@@ -328,7 +328,7 @@ Now, I am going to build all the networks we have and then iterate over this fun
 ```{r}
 # Network for wave 2 elephant data 
 # Import the data 
-elephant_data_w2 <- read_csv("Data/dist.matrix.t2.csv")
+elephant_data_w2 <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/dist.matrix.t2.csv")
 # Transform data into square matrix
 elephant_matrix_w2 <- elephant_data_w2 %>% 
   select(2:ncol(elephant_data_w2)) %>% 
@@ -349,7 +349,7 @@ graph_from_adjacency_matrix(inv_elephant_matrix_w2, mode = "undirected", weighte
 
 # Network elephant data wave 3 
 # Import the data 
-elephant_data_w3 <- read_csv("Data/dist.matrix.t3.csv")
+elephant_data_w3 <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/dist.matrix.t3.csv")
 # Transform data into square matrix
 elephant_matrix_w3 <- elephant_data_w3 %>% 
   select(2:ncol(elephant_data_w3)) %>% 
@@ -370,7 +370,7 @@ graph_from_adjacency_matrix(inv_elephant_matrix_w3, mode = "undirected", weighte
 
 # Network dolphin data wave 1
 # Import the data
-dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
+dolphin_edge_lists <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/dolphin_edge_lists.csv")
 
 # Write function to return the graph from a wave
 # Function to plot the networks 
@@ -416,7 +416,7 @@ dolphin_edgelist <- function(w, t) {
 }
 # Import the ID list data 
 # Contains removal information 
-id_list <- read_csv("Data/ID_list.csv")
+id_list <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/ID_list.csv")
 dolphin_w1 <- dolphin_edgelist(w = 1, 
                                t = 0)
 
@@ -511,43 +511,68 @@ if (simple == T) {
   return(list(res, graph_pruned))
 }
 }
+backbone_rough <- function(g, quant) {
+  copy_mat <- as_adjacency_matrix(g, 
+                                attr = 'weight')
+copy_mat[copy_mat < quantile(E(g)$weight, quant)] <- 0  
+net <- graph_from_adjacency_matrix(copy_mat, mode = "undirected", weighted = T)
+return(g)
+} 
 
 backbone_ew1_25 <- backbone_graph(alpha = 0.4, 
                                simple = F, 
                                g = elephant_graph_inv)
 enet_w1 <- backbone_ew1_25[[2]]
+enet_w1_cut <- backbone_rough(elephant_graph_inv,
+                              quant = 0.75)
 backbone_ew2_25 <- backbone_graph(alpha = 0.4, 
                                simple = F, 
                                g = elephant_graph_w2)
 enet_w2 <- backbone_ew2_25[[2]]
+enet_w2_cut <- backbone_rough(elephant_graph_w2,
+                              quant = 0.75)
 backbone_ew3_25 <- backbone_graph(alpha = 0.36, 
                                simple = F, 
                                g = elephant_graph_w3)
 enet_w3 <- backbone_ew3_25[[2]]
+enet_w3_cut <- backbone_rough(elephant_graph_w3,
+                              quant = 0.75)
 backbone_dw1_25 <- backbone_graph(alpha = 0.25, 
                                simple = F, 
                                g = dolphin_w1)
 dnet_w1 <- backbone_dw1_25[[2]]
+dnet_w1_cut <- backbone_rough(dolphin_w1,
+                              quant = 0.75)
 backbone_dw2_25 <- backbone_graph(alpha = 0.23, 
                                simple = F, 
                                g = dolphin_w2)
 dnet_w2 <- backbone_dw2_25[[2]]
+dnet_w2_cut <- backbone_rough(dolphin_w2,
+                              quant = 0.75)
 backbone_dw3_25 <- backbone_graph(alpha = 0.24, 
                                simple = F, 
                                g = dolphin_w3)
 dnet_w3 <- backbone_dw3_25[[2]]
+dnet_w3_cut <- backbone_rough(dolphin_w3,
+                              quant = 0.75)
 backbone_dw4_25 <- backbone_graph(alpha = 0.26, 
                                simple = F, 
                                g = dolphin_w4)
 dnet_w4 <- backbone_dw4_25[[2]]
+dnet_w4_cut <- backbone_rough(dolphin_w4,
+                              quant = 0.75)
 backbone_dw5_25 <- backbone_graph(alpha = 0.25, 
                                simple = F, 
                                g = dolphin_w5)
 dnet_w5 <- backbone_dw5_25[[2]]
+dnet_w5_cut <- backbone_rough(dolphin_w5,
+                              quant = 0.75)
 backbone_dw6_25 <- backbone_graph(alpha = 0.25, 
                                simple = F, 
                                g = dolphin_w6)
 dnet_w6 <- backbone_dw6_25[[2]]
+dnet_w6_cut <- backbone_rough(dolphin_w6,
+                              quant = 0.75)
 ```
 
 Now, I'm going to try to run the function. 
@@ -559,6 +584,9 @@ all_networks <- list(elephant_graph_inv,
                      enet_w1, 
                      enet_w2, 
                      enet_w3,
+                     enet_w1_cut,
+                     enet_w2_cut,
+                     enet_w3_cut,
                      dolphin_w1, 
                      dolphin_w2, 
                      dolphin_w3, 
@@ -570,7 +598,13 @@ all_networks <- list(elephant_graph_inv,
                      dnet_w3, 
                      dnet_w4, 
                      dnet_w5, 
-                     dnet_w6)
+                     dnet_w6, 
+                     dnet_w1_cut, 
+                     dnet_w2_cut, 
+                     dnet_w3_cut, 
+                     dnet_w4_cut,
+                     dnet_w5_cut,
+                     dnet_w6_cut)
 set.seed(76)
 network_features_df <- map_df(all_networks, 
                               multiple_network_features)
@@ -580,6 +614,6 @@ Let's save the dataframe
 
 ```{r}
 write_csv(network_features_df, 
-          "Data/network_features.csv")
+          "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/network_features.csv")
 ```
 

@@ -286,7 +286,7 @@ info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
       # Proceed if there is at least one neighbour
       if(sum(nei) > 0){
         # Simple contagion for e = 1 and complex contagion for e = 2
-        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/sum(nei))^e){
           info[i] <- TRUE
         }
       }

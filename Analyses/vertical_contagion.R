@@ -69,3 +69,94 @@ dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
 # Attribute file
 id_list <- read_csv("Data/ID_list.csv")
 
+# Get the network 
+dolphin_w1 <- dolphin_edgelist(w = 1, 
+                              t = 0, 
+                              node_file = id_list)
+
+
+
+# Now write function for vertical social learning
+info_contagion_vertical <- function(net, rewire, e = 1, r_max, sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+  adjm <- get.adjacency(net, 
+                        sparse = F, 
+                        attr = "weight")
+  
+  # Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+  # adjm_bool <- adjm > 0
+  
+  # Set number of individuals based adjacency matrix
+  N <- vcount(net)
+  
+  # Create a vector indicating possession of info and set one entry to TRUE
+  info <- rep(FALSE, N)
+  info[sample(x = N, size = 1)] <- TRUE
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      ties <- adjm[i,] > 0
+      nei <- ties & V(net)$age > V(net)$age[i]
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,which(nei & info)])/sum(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+
+# Does it work? 
+
+results <- info_contagion_vertical(net = dolphin_w1, 
+                                   rewire = F, 
+                                   e = 1, 
+                                   r_max = 500, 
+                                   sim = 1)
+
+results %>% 
+  ggplot(aes(x = time, 
+             y = proportion)) + 
+  geom_line()
+
+# What about after some random removal 
+rmv <- sample(1:vcount(dolphin_w1), 10)
+ng <- delete.vertices(dolphin_w1, rmv)
+
+results <- info_contagion_vertical(net = ng, 
+                                   rewire = F, 
+                                   e = 1, 
+                                   r_max = 500, 
+                                   sim = 1)
+
+results %>% 
+  ggplot(aes(x = time, 
+             y = proportion)) + 
+  geom_line()

@@ -35,7 +35,7 @@ Let's read in the data and build the network.
 
 ```{r}
 # Import the data 
-elephant_data <- read_csv("Data/dist.matrix.t1.csv")
+elephant_data <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/dist.matrix.t1.csv")
 # Transform data into square matrix
 elephant_matrix <- elephant_data %>% 
   select(2:ncol(elephant_data)) %>% 
@@ -222,7 +222,7 @@ info_contagion <- function(net, rewire, e = 1, r_max, sim = 1){
       # Proceed if there is at least one neighbour
       if(sum(nei) > 0){
         # Simple contagion for e = 1 and complex contagion for e = 2
-        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/length(nei))^e){
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/sum(nei))^e){
           info[i] <- TRUE
         }
       }
@@ -416,7 +416,7 @@ Now, let's look at a network that displayed big differences: wave 6 of the dolph
 
 ```{r}
 # Import the data
-dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
+dolphin_edge_lists <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/dolphin_edge_lists.csv")
 
 # Write function to return the graph from a wave
 # Function to plot the networks 
@@ -464,7 +464,7 @@ dolphin_edgelist <- function(w, t) {
 # Import the ID list data 
 # Contains removal information 
 
-id_list <- read_csv("Data/ID_list.csv")
+id_list <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/ID_list.csv")
 
 ```
 
