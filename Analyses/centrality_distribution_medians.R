@@ -251,10 +251,10 @@ nets <- list(elephant_w1,
              dolphin_w6_bb)
 
 set.seed(76)
-targeted_medians <- map(nets, 
-    distribution_of_medians, 
-    num_iterations = 50, 
-    removal_type = "targeted")
+cent_medians <- map(nets, 
+                        distribution_of_medians, 
+                        num_iterations = 50, 
+                        removal_type = "centrality")
 
-saveRDS(targeted_medians, 
-        "targeted_medians_aucs.rds")
+saveRDS(cent_medians, 
+        "cent_medians_aucs.rds")
