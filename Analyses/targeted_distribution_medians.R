@@ -183,7 +183,7 @@ distribution_of_medians <- function(net,
     } else {
       net_rems <- net_rems_cent
     }
-    print(paste0("Working on: ",graph_id(net),"-",i,))
+    print(paste0("Working on: ",graph_id(net),"-",i))
     auc_diffs <- multiple_diff_auc(ev = 1, 
                                    g = net, 
                                    g2 = net_rems,
