@@ -1,12 +1,7 @@
 # Get the packages we need 
 library(tidyverse)
 library(igraph)
-library(brainGraph)
-library(patchwork)
 library(bayestestR)
-library(netrankr)
-library(ggrepel)
-library(corrplot)
 
 # Write function to return the graph from a wave
 # This time I want age in there 
@@ -62,17 +57,37 @@ dolphin_edgelist <- function(w, t, node_file) {
   V(net)$age <- df_ordered_nodes$age
   return(net)
 }
-
 # Now let's read the data in 
-# Edgelist
+# Edgelist for all networks 
 dolphin_edge_lists <- read_csv("Data/dolphin_edge_lists.csv")
 # Attribute file
 id_list <- read_csv("Data/ID_list.csv")
 
-# Get the network 
+# Wave 1 
 dolphin_w1 <- dolphin_edgelist(w = 1, 
                               t = 0, 
                               node_file = id_list)
+# Wave 2
+dolphin_w2 <- dolphin_edgelist(w = 2, 
+                               t = 0, 
+                               node_file = id_list)
+# Wave 3 
+dolphin_w3 <- dolphin_edgelist(w = 3, 
+                               t = 0, 
+                               node_file = id_list)
+# Wave 4 
+dolphin_w4 <- dolphin_edgelist(w = 4, 
+                               t = 0, 
+                               node_file = id_list)
+# Wave 5 
+dolphin_w5 <- dolphin_edgelist(w = 5, 
+                               t = 0, 
+                               node_file = id_list)
+# Wave 6
+dolphin_w6 <- dolphin_edgelist(w = 6, 
+                               t = 0, 
+                               node_file = id_list)
+
 
 
 
@@ -133,30 +148,160 @@ info_contagion_vertical <- function(net, rewire, e = 1, r_max, sim = 1){
                 sim = sim))
 }
 
-# Does it work? 
+# Function for efficiency 
+inverse_efficiency <- function(g) {
+  # Turn it into an adjacency matrix 
+  net_mat <- as_adj(g,
+                    attr = 'weight', 
+                    sparse = F)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  # Populate the diagonal with 0s
+  diag(mat_inv) <- 0
+  
+  # Create the new graph 
+  net_inv <- graph_from_adjacency_matrix(mat_inv, 
+                                         weighted = T, 
+                                         mode = 'undirected')
+  D <- distances(net_inv, 
+                 weights = E(net_inv)$weight)
+  D <- D + 1 
+  diag(D) <- 0
+  Nv <- nrow(D)
+  Dinv <- 1/D
+  eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+  geff <- sum(eff)/length(eff)
+  
+  return(geff)
+}
+decrease_efficiency <- function(g) {
+  # Get the original efficiency
+  og_geff <- inverse_efficiency(g)
+  # A matrix to store the data
+  removal_df <- matrix(NA, ncol = 6, nrow = length(V(g)))
+  # Inverse network 
+  net_mat <- as_adj(g, 
+                    attr = "weight",
+                    sparse = FALSE)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  for (i in 1:length(V(g))) {
+    vert <- V(g)[i]
+    deg <- degree(g)[vert]
+    ecent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+    bcent <- betweenness(g, directed = FALSE, weights = E(inv_network)$weight)[vert]
+    net_mat <- as_adj(g, attr = 'weight', sparse = F)
+    sum_weigths <- sum(net_mat[vert,], na.rm = T)
+    ng <- delete.vertices(g, vert)
+    eff <- inverse_efficiency(ng)
+    removal_df[i,] <- c(names(vert), 
+                        eff-og_geff,
+                        deg,
+                        sum_weigths, 
+                        ecent, 
+                        bcent)
+  }
+  
+  removal_df <- data.frame(removal_df)
+  names(removal_df) <- c("node_name", "change_efficiency",
+                         "degree", "sum_edge_weights", 
+                         "eigen_centrality", 
+                         "betweenness")
+  removal_df <- removal_df %>% 
+    mutate_at(.vars = c("change_efficiency",
+                        "degree", "sum_edge_weights", 
+                        "eigen_centrality", 
+                        "betweenness"), 
+              as.numeric)
+  
+  return(removal_df)
+}
+multiple_diff_auc <- function(ev, g, g2, reps, turns) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion_vertical(g, 
+                          rewire = F, 
+                          e = ev, 
+                          r_max = turns)
+    auc_nr <- area_under_curve(x = sim$time, 
+                               y = sim$proportion)
+    
+    # Now with removal
+    sim_r <- info_contagion_vertical(g2, 
+                            rewire = F, 
+                            e = ev, 
+                            r_max = turns)
+    auc_r <- area_under_curve(x = sim_r$time, 
+                              y = sim_r$proportion)
+    
+    diff <- auc_r/auc_nr
+    
+    values[i] <- diff
+  }
+  return(values)
+}
+distribution_of_medians <- function(net, 
+                                    removal_type, 
+                                    num_iterations) {
+  removals <- decrease_efficiency(net)
+  # Remove the top 10 in efficiency 
+  top_nodes_targeted <- removals %>% 
+    arrange(change_efficiency) %>% 
+    slice(1:10) %>% 
+    pull(node_name)
+  # Pull top 10 centrality
+  top_nodes_cent<- removals %>% 
+    arrange(desc(betweenness)) %>% 
+    slice(1:10) %>% 
+    pull(node_name)
+  
+  # Remove the vertex with highest impact 
+  net_rems_targeted <- delete.vertices(net, V(net)[top_nodes_targeted])
+  net_rems_cent <- delete.vertices(net, V(net)[top_nodes_cent])
+  rmv <- sample(1:vcount(net), 10)
+  net_rems_random <- delete.vertices(net,rmv)
+  medians <- rep(NA, num_iterations)
+  for (i in 1:num_iterations) {
+    if(removal_type == "targeted") {
+      net_rems <- net_rems_targeted
+    } else if(removal_type == "centrality") {
+      net_rems <- net_rems_cent
+    } else {
+      net_rems <- net_rems_random
+    }
+    print(paste0("Working on: ",graph_id(net),"-",i))
+    auc_diffs <- multiple_diff_auc(ev = 1, 
+                                   g = net, 
+                                   g2 = net_rems,
+                                   reps = 100, 
+                                   turns = 350)
+    medians[[i]] <- median(auc_diffs)
+  }
+  return(medians)
+}
 
-results <- info_contagion_vertical(net = dolphin_w1, 
-                                   rewire = F, 
-                                   e = 1, 
-                                   r_max = 500, 
-                                   sim = 1)
+# List of all the dolphin networks 
+nets <- list(dolphin_w1, 
+             dolphin_w2, 
+             dolphin_w3, 
+             dolphin_w4, 
+             dolphin_w5, 
+             dolphin_w6)
 
-results %>% 
-  ggplot(aes(x = time, 
-             y = proportion)) + 
-  geom_line()
+set.seed(76)
+targeted_medians <- map(nets, 
+                        distribution_of_medians, 
+                        num_iterations = 50, 
+                        removal_type = "targeted")
 
-# What about after some random removal 
-rmv <- sample(1:vcount(dolphin_w1), 10)
-ng <- delete.vertices(dolphin_w1, rmv)
-
-results <- info_contagion_vertical(net = ng, 
-                                   rewire = F, 
-                                   e = 1, 
-                                   r_max = 500, 
-                                   sim = 1)
-
-results %>% 
-  ggplot(aes(x = time, 
-             y = proportion)) + 
-  geom_line()
+saveRDS(targeted_medians, 
+        "targeted_vertical_medians_aucs.rds")
