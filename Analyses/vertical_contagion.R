@@ -116,14 +116,14 @@ info_contagion_vertical <- function(net, rewire, e = 1, r_max, sim = 1){
   
   # Create a reporting variable
   proportion <- rep(0, r_max)
-  
+  ages <- V(net)$age
   # Rounds
   for(r in 1:r_max){
     # In random sequence go through all individuals without info
     for(i in sample(N)){
       # Select i's neighbourhood 
       ties <- adjm[i,] > 0
-      nei <- ties & V(net)$age > V(net)$age[i]
+      nei <- ties & ages > ages[i]
       # If you dont want to include weights, quote above, unquote below
       #nei <- adjm_bool[i,]
       # Proceed if there is at least one neighbour
@@ -283,7 +283,7 @@ distribution_of_medians <- function(net,
                                    g = net, 
                                    g2 = net_rems,
                                    reps = 100, 
-                                   turns = 350)
+                                   turns = 100)
     medians[[i]] <- median(auc_diffs)
   }
   return(medians)
