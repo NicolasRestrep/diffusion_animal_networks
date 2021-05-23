@@ -283,7 +283,7 @@ distribution_of_medians <- function(net,
                                    g = net, 
                                    g2 = net_rems,
                                    reps = 100, 
-                                   turns = 100)
+                                   turns = 500)
     medians[[i]] <- median(auc_diffs)
   }
   return(medians)
@@ -304,4 +304,4 @@ targeted_medians <- map(nets,
                         removal_type = "targeted")
 
 saveRDS(targeted_medians, 
-        "targeted_vertical_medians_aucs.rds")
+        "targeted_vertical_medians_aucs_quick.rds")
