@@ -116,14 +116,13 @@ info_contagion_vertical <- function(net, rewire, e = 1, r_max, sim = 1){
   
   # Set number of individuals based adjacency matrix
   N <- vcount(net)
-  
+  ages <- V(net)$age
   # Create a vector indicating possession of info and set one entry to TRUE
   info <- rep(FALSE, N)
-  info[which.max(bcent)] <- TRUE
+  info[which.max(ages)] <- TRUE
   
   # Create a reporting variable
   proportion <- rep(0, r_max)
-  ages <- V(net)$age
   # Rounds
   for(r in 1:r_max){
     # In random sequence go through all individuals without info
@@ -307,7 +306,7 @@ nets <- list(dolphin_w1,
 set.seed(76)
 targeted_medians <- map(nets, 
                         distribution_of_medians, 
-                        num_iterations = 50, 
+                        num_iterations = 25, 
                         removal_type = "centrality")
 
 saveRDS(targeted_medians, 
