@@ -1,0 +1,593 @@
+---
+title: "Less Uncertain Estimates"
+author: "Nicolas Restrepo"
+date: "6/4/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+```
+
+```{r}
+library(tidyverse)
+library(igraph)
+library(brainGraph)
+library(patchwork)
+library(bayestestR)
+library(netrankr)
+library(ggrepel)
+library(corrplot)
+```
+
+## Introduction 
+
+One of the main obstacles we are running into is that there are a lot of sources of randomness in the simulations, and therefore getting relatively uncertain estimates is difficult. A series of runs might show that, after removal, a network is much less efficient at transmitting information. However, this might not actually reflect the structure's weakness to removals, but rather be a artifact of the node which was first seeded in the contagion simulations. 
+
+Here, I am going to show different ways I've begun implementing to get around this problem. I'll begin by re-stating the problem, and then showing some of the solutions I have arrived at. 
+
+## The Problem 
+
+One method we have been using to compare whether graphs after removal actually different in their capacity to transmit information is to compare the area under the curve for the trajectories of diffusion. The comparisons go like this: 
+
+1) Run contagion model.
+2) Run contagion model with node removal. 
+3) Calculate areas under the curve for both diffusion trajectories.
+4) Find the ratio between these areas. 
+5) Repeat 1 through 4 so we get a distribution of differences of areas under the curve. 
+
+We have been dividing the area under the curve of the trajectory from the network after removals over its counterpart. Therefore, values below 1 indicate that the network after removals is worse at transmitting information. 
+
+This is how a distribution of a hundred differences looks like for wave 1 of the elephant network. 
+
+```{r}
+# Import the data 
+elephant_data <- read_csv("/Users/nrestrepo/Documents/diffusion_animal_networks/Data/dist.matrix.t1.csv")
+# Transform data into square matrix
+elephant_matrix <- elephant_data %>% 
+  select(2:ncol(elephant_data)) %>% 
+  as.matrix() 
+# Change the names so that nodes have the same ID as in the dataset
+node_IDs <- names(elephant_data)[2:ncol(elephant_data)]
+colnames(elephant_matrix) <- node_IDs
+rownames(elephant_matrix) <- node_IDs
+# Build inverse matrix
+inv_elephant_matrix <- matrix(1, 97, 97) - elephant_matrix
+# Populate the diagonal with 0s
+diag(inv_elephant_matrix) <- 0
+# Now create the network
+elephant_graph_inv <- 
+graph_from_adjacency_matrix(inv_elephant_matrix, mode = "undirected", weighted = T)
+
+inverse_efficiency <- function(g) {
+  # Turn it into an adjacency matrix 
+  net_mat <- as_adj(g,
+                    attr = 'weight', 
+                    sparse = F)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  # Populate the diagonal with 0s
+  diag(mat_inv) <- 0
+  
+  # Create the new graph 
+  net_inv <- graph_from_adjacency_matrix(mat_inv, 
+                                         weighted = T, 
+                                         mode = 'undirected')
+  D <- distances(net_inv, 
+                 weights = E(net_inv)$weight)
+  D <- D + 1 
+  diag(D) <- 0
+  Nv <- nrow(D)
+  Dinv <- 1/D
+  eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+  geff <- sum(eff)/length(eff)
+  
+  return(geff)
+}
+
+decrease_efficiency <- function(g) {
+  # Get the original efficiency
+  og_geff <- inverse_efficiency(g)
+  # A matrix to store the data
+  removal_df <- matrix(NA, ncol = 7, nrow = length(V(g)))
+  # Inverse network 
+  net_mat <- as_adj(g, 
+                    attr = "weight",
+                    sparse = FALSE)
+  # Get the inverse matrix 
+  mat_inv <- net_mat 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  for (i in 1:length(V(g))) {
+    vert <- V(g)[i]
+    deg <- degree(g)[vert]
+    ecent <- eigen_centrality(g, weights = E(g)$weight)$vector[vert]
+    bcent <- betweenness(g, directed = FALSE, weights = E(inv_network)$weight)[vert]
+    bonacich_cent <- power_centrality(g, exponent = 1, rescale = T)[vert]
+    net_mat <- as_adj(g, attr = 'weight', sparse = F)
+    sum_weigths <- sum(net_mat[vert,], na.rm = T)
+    ng <- delete.vertices(g, vert)
+    eff <- inverse_efficiency(ng)
+    removal_df[i,] <- c(names(vert), 
+                        eff-og_geff,
+                        deg,
+                        sum_weigths, 
+                        ecent, 
+                        bcent, 
+                        bonacich_cent)
+  }
+  
+  removal_df <- data.frame(removal_df)
+  names(removal_df) <- c("node_name", "change_efficiency",
+                         "degree", "sum_edge_weights", 
+                         "eigen_centrality", 
+                         "betweenness", 
+                         "bonacich")
+  removal_df <- removal_df %>% 
+    mutate_at(vars(-("node_name")),as.numeric)
+  
+  # Build an edgelist to find family ties
+  edgelist <- get.data.frame(g)
+  
+  # See which lines fullfil the requirements for kinship ties
+  kinship_ties <- rep(NA, nrow(edgelist))
+  
+  for (i in 1:nrow(edgelist)) {
+    pat_from <- edgelist$from[i]
+    if (str_detect(edgelist$to[i], "\\.") != TRUE) {
+      kinship_ties[i] <- 0
+    } else {
+      pat_to <- sub("\\..*", "", edgelist$to[i])
+      if (pat_from==pat_to) {
+        kinship_ties[i] <- 1
+      } else {
+        kinship_ties[i] <- 0
+      }
+    }
+  }
+  
+  edgelist$kinship <- kinship_ties
+  
+  mothers <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(from)
+  
+  children <- edgelist %>% 
+    filter(kinship==1) %>% 
+    pull(to)
+  
+  removal_df <- removal_df %>% 
+    mutate(mothers = if_else(node_name %in% mothers, 1, 0), 
+           children = if_else(node_name %in% children, 1, 0))
+  
+  removal_df <- removal_df %>% 
+  mutate_at(.vars = c("change_efficiency",
+                      "degree", "sum_edge_weights", 
+                      "eigen_centrality", 
+                      "betweenness", 
+                      "bonacich"), 
+            as.numeric)
+  
+  
+  return(removal_df)
+}
+
+# First removal
+removal_ed_w1_one <- decrease_efficiency(elephant_graph_inv)
+
+# Contagion model from Acerbi et al (2020)
+info_contagion <- function(net, 
+                           rewire, 
+                           e = 1, 
+                           r_max, 
+                           sim = 1){
+  
+  # Rewire network if random is set to TRUE
+  if(rewire){
+    net <- rewire(graph = net, with = keeping_degseq(loops = F, niter = 10^3))
+  }
+  
+  # Get adjacency matrix from network
+  adjm <- get.adjacency(net, 
+                        sparse = F, 
+                        attr = "weight")
+  mat_inv <- adjm 
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.0001 - mat_inv[edges]
+  inv_network <- graph_from_adjacency_matrix(mat_inv,
+                                             mode = "undirected",
+                                             weighted = TRUE)
+  bcent <- betweenness(net, directed = FALSE, weights = E(inv_network)$weight)
+  
+  # Turn adjacency matrix into boolean (TRUE / FALSE) - if you dont want weights
+  # adjm_bool <- adjm > 0
+  
+  # Set number of individuals based adjacency matrix
+  N <- vcount(net)
+  
+  # Create a vector indicating possession of info and set one entry to TRUE
+  info <- rep(FALSE, N)
+  info[sample(x=N, size = 1)] <- TRUE
+  
+  # Create a reporting variable
+  proportion <- rep(0, r_max)
+  
+  # Rounds
+  for(r in 1:r_max){
+    # In random sequence go through all individuals without info
+    for(i in sample(N)){
+      # Select i's neighbourhood 
+      nei <- adjm[i,] > 0
+      # If you dont want to include weights, quote above, unquote below
+      #nei <- adjm_bool[i,]
+      # Proceed if there is at least one neighbour
+      if(sum(nei) > 0){
+        # Simple contagion for e = 1 and complex contagion for e = 2
+        if(runif(n = 1, min = 0, max = 1) <= (sum(adjm[i,][info])/sum(nei))^e){
+          info[i] <- TRUE
+        }
+      }
+    }
+    # Record proportion of the population with info
+    proportion[r] <- sum(info) / N
+    # Increment the round counter
+    r <- r + 1
+  }
+  # Return a tibble with simulation results
+  return(tibble(time = 1:r_max, 
+                proportion = proportion, 
+                time_to_max = which(proportion == max(proportion))[1],
+                e = e, 
+                network = ifelse(test = rewire, yes = "random", no = "model output"),
+                sim = sim))
+}
+# Network with targeted removals 
+# Pull the five most influential nodes
+top_nodes_ed_w1 <- removal_ed_w1_one %>% 
+  arrange(change_efficiency) %>% 
+  slice(1:10) %>% 
+  pull(node_name)
+# Remove the vertex with highest impact 
+ed_w1_rems <- delete.vertices(elephant_graph_inv, V(elephant_graph_inv)[top_nodes_ed_w1])
+
+multiple_diff_auc <- function(ev, g, g2, reps, turns) {
+  # Place holder 
+  values <- rep(NA, reps)
+  
+  for (i in 1:reps) {
+    sim <- info_contagion(g, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+    auc_nr <- area_under_curve(x = sim$time, 
+                            y = sim$proportion)
+    
+  # Now with removal
+  sim_r <- info_contagion(g2, 
+                           rewire = F, 
+                           e = ev, 
+                           r_max = turns)
+  auc_r <- area_under_curve(x = sim_r$time, 
+                            y = sim_r$proportion)
+  
+  diff <- auc_r/auc_nr
+  
+    values[i] <- diff
+  }
+  return(values)
+}
+
+set.seed(33)
+auc_diffs_targeted <- multiple_diff_auc(ev = 1, 
+                  g = elephant_graph_inv, 
+                  g2 = ed_w1_rems,
+                  reps = 100, 
+                  turns = 100)
+
+tibble(run = 1:100, 
+       difference = auc_diffs_targeted) %>% 
+  ggplot(aes(x = difference)) +
+  geom_density(fill = "gray80", 
+               alpha = 0.6) + 
+  theme_bw() +
+  labs(title = "Ratio of areas under the curve", 
+       subtitle = "Targeted removal", 
+       x = "Ratio", 
+       y = "")
+
+```
+
+The median of this distribution is actually 0.89 but notice the extremely long right tail. It is very difficult to make the case that this distribution does not overlap 1 - i.e. there is no difference between the structures' capacity to transmit information. 
+
+## Distribution of Medians
+
+What we can do is get a distribution of medians. This would give us an idea of where the central tendency of the distributions above lie on average. What we can do then is repeat the process above and get a distribution of medians. 
+
+Below I show these distributions for fifty iterations. This means: run a 100 contagion models, get the distributions of areas under the curve, take the median, and repeat this 50 times. In total, we have 5000 contagion simulations. 
+
+```{r}
+sample_medians_targeted <- readRDS("~/Documents/diffusion_animal_networks/Results/sample_medians_targeted.rds")
+
+df <- tibble(
+  network = rep(c("elephant_w1", 
+                  "elephant_w2", 
+                  "elephant_w3", 
+                  "dolphin_w1", 
+                  "dolphin_w2", 
+                  "dolphin_w3", 
+                  "dolphin_w4", 
+                  "dolphin_w5", 
+                  "dolphin_w6"), 
+                each = 50), 
+  estimate = unlist(sample_medians_targeted)
+)
+
+df %>% 
+  ggplot(aes(x = estimate, 
+             fill = network)) +
+  geom_density() +
+  geom_vline(xintercept = 1, 
+             color = 'black', 
+             linetype = "dashed") +
+  facet_wrap(~network) +
+  theme_minimal() +
+  theme(legend.position = 'none') + 
+  labs(x = "Estimate", 
+       y = "", 
+       title = "Distribution of Medians")
+```
+
+There is still a lot of uncertainty here. Most of the centers of mass of these distributions are below one, indicating that on average the networks after removal perform more poorly. But the uncertainty remains quite high. 
+
+When we think about how Gaussian distributions emerge, this makes sense. Bell-curves represent divergences around a center cancelling each other out. Here, we have the odd cases where the network with removals vastly outperforms the original network cancelling the many runs where the latter does a bit better than the former (as we would expect). 
+
+## Fixing the Seed 
+
+A great deal of randomness comes whatever node is randomly selected to be the first to acquire that which is being transmitted. A way to minimize uncertainty would be to always choose a similar node. We are dealing with two fundamentally different structures though, so we cannot choose the same nodes. But we can choose nodes that are structurally equivalent. 
+
+Below I show distributions for 25 medians where the seeded node is the one with the highest in-degree in the network. 
+
+```{r}
+fixed_medians_targeted <- readRDS("~/Documents/diffusion_animal_networks/Results/fixed_targeted_medians_aucs.rds")
+
+df <- tibble(
+  network = rep(c("elephant_w1", 
+                  "elephant_w2", 
+                  "elephant_w3", 
+                  "dolphin_w1", 
+                  "dolphin_w2", 
+                  "dolphin_w3", 
+                  "dolphin_w4", 
+                  "dolphin_w5", 
+                  "dolphin_w6"), 
+                each = 25), 
+  estimate = unlist(fixed_medians_targeted)
+)
+
+df %>% 
+  ggplot(aes(x = estimate, 
+             fill = network)) +
+  geom_density() +
+  geom_vline(xintercept = 1, 
+             color = 'black', 
+             linetype = "dashed") +
+  facet_wrap(~network) +
+  theme_minimal() +
+  theme(legend.position = 'none') + 
+  labs(x = "Estimate", 
+       y = "", 
+       title = "Distribution of Medians", 
+       subtitle = "Targeted Removals")
+
+```
+
+Here, we get much narrower distributions. For most distributions, except for wave 2 of the elephant data and wave 3 of the dolphin data, we could plausibly argue that the distributions do not overlap with 1 in a meaningful way. This means that after removals, the networks were more sluggish at transmitting information. 
+
+The plots above compare the original networks with graphs after targeted removal. Let's see what the distributions are like after centrality-based removal. 
+
+```{r}
+central_medians_targeted <- readRDS("~/Documents/diffusion_animal_networks/Results/fixed_centrality_medians_aucs.rds")
+
+df <- tibble(
+  network = rep(c("elephant_w1", 
+                  "elephant_w2", 
+                  "elephant_w3", 
+                  "dolphin_w1", 
+                  "dolphin_w2", 
+                  "dolphin_w3", 
+                  "dolphin_w4", 
+                  "dolphin_w5", 
+                  "dolphin_w6"), 
+                each = 25), 
+  estimate = unlist(central_medians_targeted)
+)
+
+df %>% 
+  ggplot(aes(x = estimate, 
+             fill = network)) +
+  geom_density() +
+  geom_vline(xintercept = 1, 
+             color = 'black', 
+             linetype = "dashed") +
+  facet_wrap(~network) +
+  theme_minimal() +
+  theme(legend.position = 'none') + 
+  labs(x = "Estimate", 
+       y = "", 
+       title = "Distribution of Medians", 
+       subtitle = "Centrality-based Removals")
+
+```
+
+A lot more uncertainty here, especially for the elephant networks.
+
+## Vertical Learning with fixed seat
+
+In our last meeting, we talked about the fact that most transmission in both dolphins and elephants occurs vertically - i.e. the young learn from those older than them. I adapted our contagion model so that this is the case. We have the ages for all dolphins, so we can look at how these graphs transmit information under the assumption of vertical learning. 
+
+The variance in these simulations is particularly wide because the initial seed might be a youngster and then the behavior does not spread at all. Conversely, the seed might be an elder and then the behavior spreads very quickly. 
+
+To counter this, I decided to also fix the initial seed in these simulations. However, when thinking about structural equivalence in this scenario, we need to consider two dimensions: age and centrality. There might be a very central node that is very young and therefore the behavior won't spread at all, despite the initial seed's connections. Here, I choose to seed the oldest agent in each network. I would welcome any and all suggestions about how to find this initial seed. 
+
+These are the distributions of the areas under the curve for vertical learning, where the oldest agent in the network is initially seeded with the behavior. For these distributions, I used targeted removal. 
+
+```{r}
+vertical_medians_targeted <- readRDS("~/Documents/diffusion_animal_networks/Results/targeted_vertical_medians_aucs_fixed.rds")
+
+df <- tibble(
+  network = rep(c("dolphin_w1", 
+                  "dolphin_w2", 
+                  "dolphin_w3", 
+                  "dolphin_w4", 
+                  "dolphin_w5", 
+                  "dolphin_w6"), 
+                each = 25), 
+  estimate = unlist(vertical_medians_targeted)
+)
+
+df %>% 
+  ggplot(aes(x = estimate, 
+             fill = network)) +
+  geom_density() +
+  geom_vline(xintercept = 1, 
+             color = 'black', 
+             linetype = "dashed") +
+  facet_wrap(~network) +
+  theme_minimal() +
+  theme(legend.position = 'none') + 
+  labs(x = "Estimate", 
+       y = "", 
+       title = "Distribution of Medians", 
+       subtitle = "Vertical learning; targeted removal")
+
+
+```
+
+In the case of vertical learning, we notice a lot less uncertainty. All distributions are below one and most of them - except for wave 6 - have little variance. 
+
+Let's see how these distributions look like after centrality-based removal. 
+
+```{r}
+vertical_medians_central <- readRDS("~/Documents/diffusion_animal_networks/Results/central_vertical_medians_aucs_fixed.rds")
+
+df <- tibble(
+  network = rep(c("dolphin_w1", 
+                  "dolphin_w2", 
+                  "dolphin_w3", 
+                  "dolphin_w4", 
+                  "dolphin_w5", 
+                  "dolphin_w6"), 
+                each = 25), 
+  estimate = unlist(vertical_medians_central)
+)
+
+df %>% 
+  ggplot(aes(x = estimate, 
+             fill = network)) +
+  geom_density() +
+  geom_vline(xintercept = 1, 
+             color = 'black', 
+             linetype = "dashed") +
+  facet_wrap(~network) +
+  theme_minimal() +
+  theme(legend.position = 'none') + 
+  labs(x = "Estimate", 
+       y = "", 
+       title = "Distribution of Medians", 
+       subtitle = "Vertical learning; centrality-based removal")
+
+```
+
+The patterns here are a bit eclectic. We notice that most distributions lie below 1, except for wave 1. Just as above, we notice a fair amount of uncertainty for wave 6. 
+
+## Network Features
+
+Now, it would be interesting to explore how these estimates relate to the structural features of the networks. Let's look at some correlations. This is a crude approach but might give us some clues about what questions to pursue. 
+
+```{r}
+network_features <- read_csv("Data/network_features.csv")
+
+network_features <- network_features %>% 
+  mutate(species = c(rep('elephant',9), 
+                     rep('dolphin',18)), 
+         wave = c(1:3, 1:3, 1:3, 1:6, 1:6, 1:6), 
+         type = c(rep("full", 3), 
+                  rep("pruned", 3), 
+                  rep("thresh", 3),
+                  rep("full", 6),
+                  rep("pruned", 6), 
+                  rep("thresh", 6)),
+         network = paste0(species, "_w", wave, "_", type))
+
+nets_full <- network_features %>% 
+  filter(type == "full")
+get_median <- function(l) {
+map_dbl(.x = c(1:9), 
+        ~ median(l[[.x]]))
+}
+
+nets_full <- nets_full %>% 
+  mutate(meds_sample = get_median(l = sample_medians_targeted), 
+         meds_ft = get_median(l = fixed_medians_targeted), meds_fc = get_median(l = central_medians_targeted))
+
+# Correlation plot 
+MD <- nets_full %>% 
+  select(meds_sample, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "All Full Networks")
+
+```
+
+The first correlation plot we have deals with the medians from the distributions without a fixed seed. We notice similar patterns than before: density makes resilient networks and modularity makes them more vulnerable. 
+
+```{r}
+# Correlation plot 
+MD <- nets_full %>% 
+  select(meds_ft, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "All Full Networks")
+
+```
+
+Using the networks with the fixed seed, we notice almost a reversal of the pattern. I am honestly not sure how to interpret this but bear in mind we have only 9 networks so we cannot read much into this. 
+
+Finally, let's have a look at vertical learning. 
+
+```{r}
+d_nets <- nets_full %>% 
+  filter(species == "dolphin")
+
+meds <- c()
+
+for (i in 1:6) {
+  m <- median(vertical_medians_targeted[[i]])
+  meds[i] <- m
+  
+}
+
+d_nets$vertical_med <- meds
+
+# Correlation plot 
+MD <- d_nets %>% 
+  select(vertical_med, num_nodes, num_edges, avg_trans, dens, mod) %>% 
+  cor(.)
+
+corrplot(MD, method = "number", title = "Vertical Learning")
+
+```
+
+Okay, here we notice a similar trend to the one we saw in the first correlation plot with modularity being negatively related and density positively correlated. 
+
+## Wrapping Thoughts
+
+Fixing the initial seed helps us get tighter estimates of how vulnerable the networks are to different types of removal. This allows us to make a case with more confidence. However, the correlations between the median of these estimates and networks are a bit confusing. Having said that, we only have nine networks so reading too much into the correlations would be misguided. 
+
