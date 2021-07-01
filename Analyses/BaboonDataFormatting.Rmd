@@ -1,0 +1,106 @@
+---
+title: "BaboonDataFormatting"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+# Packages
+library(tidyverse)
+library(igraph)
+
+```
+
+```{r}
+# Importing the data
+bab_dat<- read.csv("../Data/baboon_data/grooming.csv")
+```
+
+
+Creating Matrices
+```{r}
+# 1) sub-setting data per year (there is an intentional gap in 1990 because of an atypical group fission event)
+bab_dat1<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date <= "1997-12-31 ")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+bab_dat2<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date > "1997-12-31" & date <= "1998-12-31")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+bab_dat3<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date > "1999-07-31" & date <= "2000-08-01")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+bab_dat4<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date > "2000-07-31" & date <= "2001-08-01")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+# all nodes per dataset
+babs1<- unique(c(bab_dat1$actor, bab_dat1$actee))
+babs2<- unique(c(bab_dat2$actor, bab_dat2$actee))
+babs3<- unique(c(bab_dat3$actor, bab_dat3$actee))
+babs4<- unique(c(bab_dat4$actor, bab_dat4$actee))
+
+# directed graphs
+bab1_graph<- graph_from_data_frame(d = bab_dat1, vertices = babs1, direct = T) 
+bab2_graph<- graph_from_data_frame(d = bab_dat2, vertices = babs2, direct = T) 
+bab3_graph<- graph_from_data_frame(d = bab_dat3, vertices = babs3, direct = T) 
+bab4_graph<- graph_from_data_frame(d = bab_dat4, vertices = babs4, direct = T) 
+
+# collapse into undirected graph
+bab1_graph<- as.undirected(bab1_graph, mode = "collapse",
+                            edge.attr.comb = igraph_opt("edge.attr.comb"))
+bab2_graph<- as.undirected(bab2_graph, mode = "collapse",
+                            edge.attr.comb = igraph_opt("edge.attr.comb"))
+bab3_graph<- as.undirected(bab3_graph, mode = "collapse",
+                            edge.attr.comb = igraph_opt("edge.attr.comb"))
+bab4_graph<- as.undirected(bab4_graph, mode = "collapse",
+                            edge.attr.comb = igraph_opt("edge.attr.comb"))
+
+
+# double checking collapsing correctly added weights together for undirected graph
+E(bab1_graph)$weight
+#bab_dat1 %>% filter(actor %in% c("ACA", "ASH") & actee %in% c("ACA", "ASH") )
+bab_dat4[(bab_dat4$actor == "DOT" & bab_dat4$actee == "ABB") | (bab_dat4$actor == "ABB" & bab_dat4$actee == "DOT"),]
+E(bab1_graph)$weight[6]
+
+# Creating adjacency matrix from graphs
+
+bab1_mat<- as_adjacency_matrix(bab1_graph, type = "both", sparse = F, attr = "weight")
+bab2_mat<- as_adjacency_matrix(bab2_graph, type = "both", sparse = F, attr = "weight")
+bab3_mat<- as_adjacency_matrix(bab3_graph, type = "both", sparse = F, attr = "weight")
+bab4_mat<- as_adjacency_matrix(bab4_graph, type = "both", sparse = F, attr = "weight")
+
+
+
+
+bab1_mat[1:10, 1:10]
+bab2_mat[1:10, 1:10]
+bab3_mat[1:10, 1:10]
+bab4_mat[1:10, 1:10]
+
+```
+
+
+
+
+
+
+
+
