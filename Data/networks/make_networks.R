@@ -10,6 +10,7 @@ library(netrankr)
 library(ggrepel)
 library(corrplot)
 library(here)
+library(readxl)
 
 here::here()
 #### Efficiency Functions ####
@@ -227,6 +228,82 @@ dolphin_w5 <- dolphin_edgelist(w = 5,
 dolphin_w6 <- dolphin_edgelist(w = 6, 
                                t = 0)
 
+#### Baboon Data - No Removals ####
+# Importing the data
+bab_dat <- read_excel("~/Documents/diffusion_animal_networks/Data/baboon_data/Data_Tables/grooming.xls")
+
+# We'll create the matrix 
+# 1) sub-setting data per year (there is an intentional gap in 1990 because of an atypical group fission event)
+bab_dat1<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date <= "1997-12-31 ")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+bab_dat2<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date > "1997-12-31" & date <= "1998-12-31")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+bab_dat3<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date > "1999-07-31" & date <= "2000-08-01")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+bab_dat4<- bab_dat%>%
+  mutate(date = as.Date(date), format = "%Y-%m-%d")%>%
+  filter(date > "2000-07-31" & date <= "2001-08-01")%>%
+  dplyr::select(actor, actee)%>%
+  group_by(actor, actee)%>%
+  count()%>%
+  dplyr::rename(weight = n)
+
+# all nodes per dataset
+babs1<- unique(c(bab_dat1$actor, bab_dat1$actee))
+babs2<- unique(c(bab_dat2$actor, bab_dat2$actee))
+babs3<- unique(c(bab_dat3$actor, bab_dat3$actee))
+babs4<- unique(c(bab_dat4$actor, bab_dat4$actee))
+
+# directed graphs
+bab1_graph<- graph_from_data_frame(d = bab_dat1, vertices = babs1, direct = T) 
+bab2_graph<- graph_from_data_frame(d = bab_dat2, vertices = babs2, direct = T) 
+bab3_graph<- graph_from_data_frame(d = bab_dat3, vertices = babs3, direct = T) 
+bab4_graph<- graph_from_data_frame(d = bab_dat4, vertices = babs4, direct = T) 
+
+# collapse into undirected graph
+bab1_graph<- as.undirected(bab1_graph, mode = "collapse",
+                           edge.attr.comb = igraph_opt("edge.attr.comb"))
+bab2_graph<- as.undirected(bab2_graph, mode = "collapse",
+                           edge.attr.comb = igraph_opt("edge.attr.comb"))
+bab3_graph<- as.undirected(bab3_graph, mode = "collapse",
+                           edge.attr.comb = igraph_opt("edge.attr.comb"))
+bab4_graph<- as.undirected(bab4_graph, mode = "collapse",
+                           edge.attr.comb = igraph_opt("edge.attr.comb"))
+
+b3cs <- components(bab3_graph)$membership
+
+bab3_a <- delete.vertices(bab3_graph, 
+                          names(which(b3cs == 1)))
+
+bab3_b <- delete.vertices(bab3_graph, 
+                          names(which(b3cs == 2)))
+
+b4cs <- components(bab4_graph)$membership
+
+bab4_a <- delete.vertices(bab4_graph, 
+                          names(which(b4cs == 1)))
+
+bab4_b <- delete.vertices(bab4_graph, 
+                          names(which(b4cs == 2)))
+
 #### Functions - Backboning ####
 backbone_graph <- function(alpha, simple, g) {
   
@@ -407,6 +484,7 @@ saveRDS(dnet_w2_cut,
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/dolphin_w2_cut.rds")
 saveRDS(dnet_w3_cut, 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/dolphin_w3_cut.rds")
+
 saveRDS(dnet_w4_cut, 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/dolphin_w4_cut.rds")
 saveRDS(dnet_w5_cut, 
@@ -414,6 +492,25 @@ saveRDS(dnet_w5_cut,
 saveRDS(dnet_w6_cut, 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/dolphin_w6_cut.rds")
 
+
+saveRDS(bab1_graph , 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w1.rds")
+
+saveRDS(bab2_graph , 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w2.rds")
+
+saveRDS(bab3_a , 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3_a.rds")
+
+saveRDS(bab3_b , 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3_b.rds")
+
+saveRDS(bab4_a , 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4_a.rds")
+
+
+saveRDS(bab4_b , 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4_b.rds")
 
 
 
