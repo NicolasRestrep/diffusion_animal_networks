@@ -287,6 +287,31 @@ bab3_graph<- as.undirected(bab3_graph, mode = "collapse",
                            edge.attr.comb = igraph_opt("edge.attr.comb"))
 bab4_graph<- as.undirected(bab4_graph, mode = "collapse",
                            edge.attr.comb = igraph_opt("edge.attr.comb"))
+# Standardize the networks 
+bab1_mat<- as_adjacency_matrix(bab1_graph, type = "both", sparse = F, attr = "weight")
+bab2_mat<- as_adjacency_matrix(bab2_graph, type = "both", sparse = F, attr = "weight")
+bab3_mat<- as_adjacency_matrix(bab3_graph, type = "both", sparse = F, attr = "weight")
+bab4_mat<- as_adjacency_matrix(bab4_graph, type = "both", sparse = F, attr = "weight")
+
+bab1_mat_z <- bab1_mat/max(bab1_mat)
+bab1_graph <- graph_from_adjacency_matrix(bab1_mat_z, 
+                                          mode = "undirected", 
+                                          weighted = T)
+
+bab2_mat_z <- bab2_mat/max(bab2_mat)
+bab2_graph <- graph_from_adjacency_matrix(bab2_mat_z, 
+                                          mode = "undirected", 
+                                          weighted = T)
+
+bab3_mat_z <- bab3_mat/max(bab3_mat)
+bab3_graph <- graph_from_adjacency_matrix(bab3_mat_z, 
+                                          mode = "undirected", 
+                                          weighted = T)
+
+bab4_mat_z <- bab4_mat/max(bab4_mat)
+bab4_graph <- graph_from_adjacency_matrix(bab4_mat_z, 
+                                          mode = "undirected", 
+                                          weighted = T)
 
 b3cs <- components(bab3_graph)$membership
 
@@ -377,7 +402,7 @@ backbone_rough <- function(g, quant) {
                                   attr = 'weight')
   copy_mat[copy_mat < quantile(E(g)$weight, quant)] <- 0  
   net <- graph_from_adjacency_matrix(copy_mat, mode = "undirected", weighted = T)
-  return(g)
+  return(net)
 } 
 #### Backbone Networks ####
 backbone_ew1_25 <- backbone_graph(alpha = 0.4, 
@@ -435,6 +460,48 @@ dnet_w6 <- backbone_dw6_25[[2]]
 dnet_w6_cut <- backbone_rough(dolphin_w6,
                               quant = 0.75)
 
+backbone_bw1_25 <- backbone_graph(alpha = 0.2, 
+                                  simple = F, 
+                                  g = bab1_graph)
+bnet_w1 <- backbone_bw1_25[[2]]
+bnet_w1_cut <- backbone_rough(bab1_graph,
+                              quant = 0.75)
+
+backbone_bw2_25 <- backbone_graph(alpha = 0.32, 
+                                  simple = F, 
+                                  g = bab2_graph)
+bnet_w2 <- backbone_bw2_25[[2]]
+bnet_w2_cut <- backbone_rough(bab2_graph,
+                              quant = 0.75)
+
+backbone_bw3a_25 <- backbone_graph(alpha = 0.23, 
+                                  simple = F, 
+                                  g = bab3_a)
+bnet_w3a <- backbone_bw3a_25[[2]]
+bnet_w3a_cut <- backbone_rough(bab3_a,
+                              quant = 0.75)
+
+backbone_bw3b_25 <- backbone_graph(alpha = 0.23, 
+                                   simple = F, 
+                                   g = bab3_b)
+bnet_w3b <- backbone_bw3b_25[[2]]
+bnet_w3b_cut <- backbone_rough(bab3_b,
+                               quant = 0.75)
+
+backbone_bw4a_25 <- backbone_graph(alpha = 0.25, 
+                                   simple = F, 
+                                   g = bab4_a)
+bnet_w4a <- backbone_bw4a_25[[2]]
+bnet_w4a_cut <- backbone_rough(bab4_a,
+                               quant = 0.75)
+
+backbone_bw4b_25 <- backbone_graph(alpha = 0.3, 
+                                   simple = F, 
+                                   g = bab4_b)
+bnet_w4b <- backbone_bw4b_25[[2]]
+bnet_w4b_cut <- backbone_rough(bab4_b,
+                               quant = 0.75)
+
 #### Save networks 
 saveRDS(elephant_graph_inv, 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/elephant_w1.rds")
@@ -491,26 +558,52 @@ saveRDS(dnet_w5_cut,
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/dolphin_w5_cut.rds")
 saveRDS(dnet_w6_cut, 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/dolphin_w6_cut.rds")
-
-
 saveRDS(bab1_graph , 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w1.rds")
-
 saveRDS(bab2_graph , 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w2.rds")
-
 saveRDS(bab3_a , 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3_a.rds")
-
 saveRDS(bab3_b , 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3_b.rds")
-
 saveRDS(bab4_a , 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4_a.rds")
-
-
 saveRDS(bab4_b , 
         "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4_b.rds")
+saveRDS(bnet_w1 , 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w1_bb.rds")
+saveRDS(bnet_w2, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w2_bb.rds")
+saveRDS(bnet_w2, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w2_bb.rds")
+saveRDS(bnet_w3a, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3a_bb.rds")
+saveRDS(bnet_w3b, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3b_bb.rds")
+saveRDS(bnet_w4a, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4a_bb.rds")
+saveRDS(bnet_w4b, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4b_bb.rds")
+saveRDS(bnet_w1_cut, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w1_cut.rds")
+saveRDS(bnet_w2_cut, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w2_cut.rds")
+saveRDS(bnet_w3a_cut, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3a_cut.rds")
+saveRDS(bnet_w3b_cut, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w3b_cut.rds")
+saveRDS(bnet_w4a_cut, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4a_cut.rds")
+saveRDS(bnet_w4b_cut, 
+        "/Users/nrestrepo/Documents/diffusion_animal_networks/Data/networks/bab_w4b_cut.rds")
+
+
+
+
+
+
+
+
 
 
 
