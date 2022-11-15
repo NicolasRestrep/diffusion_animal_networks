@@ -217,7 +217,8 @@ rdl <- rems_df %>%
 rdl %>% 
   filter(removal_type != "targeted") %>% 
   ggplot(aes(x = removals, y = efficiency, color = removal_type)) +
-  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "gray") + 
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "#A6761D") + 
+  scale_color_manual(values = c("#1B9E77", "#D95F02", "#7570B3", "#A6761D")) +
   geom_line(alpha = 0.7) +
   facet_wrap(~net) + 
   labs(title = "Global efficiency after removals", 
@@ -234,8 +235,9 @@ rdl %>%
   filter(net %in% c('elephant_w1', "elephant_w2", "elephant_w3")) %>% 
   filter(removal_type != "targeted") %>% 
   ggplot(aes(x = removals, y = efficiency, color = removal_type)) +
-  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "gray") + 
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "#A6761D") + 
   geom_line(alpha = 0.7) +
+  scale_color_manual(values = c("#1B9E77", "#D95F02", "#7570B3", "#A6761D")) +
   facet_wrap(~net) + 
   labs(title = "Global efficiency after removals", 
        x = "Percentage nodes removed", 
@@ -243,6 +245,61 @@ rdl %>%
 ```
 
 We also notice patterns in terms of what strategies are the most harmful across the different species. In general, removing the most central nodes harms the structures' global efficiency the most. This is true for both the dolphin and the baboon data; wave 6 of the dolphin data being an exception. However, for the elephant networks, removing the nodes with the highest degree proves a better strategy. This is important because it shows that a species' characteristic network topology will impact which nodes, if removed, would have a higher impact in that structure's capacity to transmit information. While in highly modular structures, central individuals might be more important, in dense and highly transitive structures individuals with a lot of connections might play a bigger role. 
+
+We can also examine the initial average efficiency across the different networks: 
+
+```{r}
+# Inverse efficiency function 
+inverse_efficiency <- function(g) {
+  # Turn it into an adjacency matrix
+  net_mat <- as_adj(g,
+                    attr = 'weight',
+                    sparse = F)
+  # Get the inverse matrix
+  mat_inv <- net_mat
+  edges <- which(mat_inv > 0)
+  mat_inv[edges] <- 1.000001 - mat_inv[edges]
+  # Populate the diagonal with 0s
+  diag(mat_inv) <- 0
+  
+  # Create the new graph
+  net_inv <- graph_from_adjacency_matrix(mat_inv,
+                                         weighted = T,
+                                         mode = 'undirected')
+  D <- distances(net_inv,
+                 weights = E(net_inv)$weight)
+  Nv <- nrow(D)
+  edges <- which(D > 0)
+  D[edges] <- D[edges] + 1
+  diag(D) <- 0
+  Dinv <- 1/D
+  eff <- colSums(Dinv * is.finite(Dinv), na.rm = T)/(Nv - 1)
+  geff <- sum(eff)/length(eff)
+  
+  return(geff)
+}
+
+# Get efficiencies 
+effs <- map_dbl(all_networks, inverse_efficiency)
+
+# Create dataframe 
+eff_df <- tibble(
+  species = c(rep("elephant", 3), 
+              rep("dolphin", 6), 
+              rep("baboon", 6)), 
+  wave = c(1:3,1:6, 1:6), 
+  efficiency = effs
+)
+
+summ_eff <- eff_df %>% 
+  group_by(species) %>% 
+  summarise(`median` = median(efficiency), 
+            `standard deviation` = sd(efficiency))
+
+kableExtra::kable(summ_eff, format = "html", caption = "Efficiency Summaries") %>% 
+  kableExtra::kable_styling("striped") 
+  
+```
 
 ## Beyond Efficiency: culture as problem solving
 
