@@ -1,0 +1,709 @@
+---
+title: "Argument Structure"
+author: "Nicolas Restrepo"
+output: 
+  html_document: 
+    toc: true
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, fig.align='center')
+library(tidyverse)
+library(igraph)
+library(brainGraph)
+library(patchwork)
+library(bayestestR)
+library(netrankr)
+library(ggrepel)
+library(corrplot)
+library(ggraph)
+library(tidygraph)
+library(patchwork)
+theme_set(jtools::theme_apa())
+```
+
+## Introduction 
+
+This study examines different species' capacity produce, retain and trasmit cultural tools after losing some of their members. Animal networks lose members continuously, for different reasons, like old age, disease, and poaching. Removing nodes, in turn, might change the topology of networks, and extensive work has shown that network structure affects how cultural tools are discovered, maintained, and disseminated. Here, we study three species - baboons, dolphins, and elephants - and their networks' capacity produce and transmit information, especially after some of their nodes are removed. We start, then, with the question: 
+
+> How resilient are these species' networks to node removal?
+
+We conceptualize network resilience as the graph's capacity discover cultural tools and to disseminate them to a majority of its members, even after some nodes have been removed. The species we focus on rely on cultural practices, like tool use. Therefore, it is vital to understand how the capacity of these species' networks to spread culture across its nodes changes as agents are removed. 
+
+## Archetypical networks 
+
+To start, it is useful to look at the general structural features of these species networks. This can allow us to identify structural differences across - or within - the species. In this study, we have three waves of data for the elephants, six for the dolphins, and four for the baboons. We consider each wave as an independent graph. The elephant data only contains relational information for the females and, therefore, we build female-only networks for each species, to make the structures comparable. A note regarding the baboon data is pertinent here. Waves three and four of the baboon data have two completely disconnected components. To think of these as one network would difficult within the context of our question, as information would never be able to jump from one component to the other. For this reason, we decide to examine the data from these waves as four distinct graphs. 
+
+To examine describe the broad characteristics of these structures, we will focus on the following structural features: average degree, transitivity, modularity, density, and average path length. 
+
+```{r}
+#### Baboon Data ####
+
+bab_w1_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/bab_w1_age.rds")
+bab_w2_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/bab_w2_age.rds")
+bab_w3_a_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/bab_w3_a_age.rds")
+bab_w3_b_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/bab_w3_b_age.rds")
+bab_w4_a_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/bab_w4_a_age.rds")
+bab_w4_b_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/bab_w4_b_age.rds")
+
+#### Dolphin Networks ####
+
+dolphin_w1 <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/dolphin_w1.rds")
+dolphin_w2 <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/dolphin_w2.rds")
+dolphin_w3 <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/dolphin_w3.rds")
+dolphin_w4 <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/dolphin_w4.rds")
+dolphin_w5 <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/dolphin_w5.rds")
+dolphin_w6 <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/dolphin_w6.rds")
+
+#### Elephant Networks ####
+
+elph_w1_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/elph_w1_age.rds")
+elph_w2_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/elph_w2_age.rds")
+elph_w3_age <- read_rds("~/Documents/diffusion_animal_networks/Data/networks/elph_w3_age.rds")
+
+all_networks <- list(elph_w1_age, 
+                  elph_w2_age, 
+                  elph_w3_age, 
+                  dolphin_w1, 
+                  dolphin_w2, 
+                  dolphin_w3, 
+                  dolphin_w4, 
+                  dolphin_w5, 
+                  dolphin_w6, 
+                  bab_w1_age, 
+                  bab_w2_age, 
+                  bab_w3_a_age, 
+                  bab_w3_b_age, 
+                  bab_w4_a_age, 
+                  bab_w4_b_age)
+
+#### Network Features ####
+multiple_network_features <- function(net) {
+# Edge density 
+dens <- edge_density(net)
+# Now community detection and modularity
+louvain_communities <- cluster_louvain(net)
+mod <- modularity(net, membership(louvain_communities))
+# Average transitivity 
+avg_trans <- transitivity(net, type = 'average')
+# Average weighted distance 
+avg_wt_dist <- mean_distance_wt(net, 
+                                weights = E(net)$weight)
+avg_dist <- mean_distance(net)
+mean_deg <- mean(degree(net))
+
+# All results the function will produce
+net_features <- c(num_nodes = length(V(net)), 
+                  num_edges = length(E(net)), 
+                  avg_trans = avg_trans, 
+                  mod = mod, 
+                  dens = dens, 
+                  avg_wt_dist = avg_wt_dist, 
+                  avg_dist = avg_dist)
+
+return(net_features)
+}
+set.seed(76)
+network_features_df <- map_df(all_networks, 
+                              multiple_network_features)
+network_features_df$network <- c("w1", 
+                  "w2", 
+                  "w3", 
+                  "w1", 
+                  "w2", 
+                  "w3", 
+                  "w4", 
+                  "w5", 
+                  "w6", 
+                  "w1", 
+                  "w2", 
+                  "w3_a", 
+                  "w3_b", 
+                  "w4_a", 
+                  "w4_b")
+
+network_features_df %>% 
+  select(network, everything()) %>% 
+  mutate(species = c(rep("elephant", 3), 
+  rep("dolphin", 6), 
+  rep("baboon", 6))) %>% 
+  pivot_longer(cols = 2:ncol(network_features_df), 
+               values_to = "value", 
+               names_to = "feature") %>% 
+  ggplot(aes(x = network, y = value, color = species)) +
+    geom_point() + 
+    facet_wrap(~feature, scales = "free_y", ncol = 3) + 
+  theme(
+    axis.text.x = element_text(angle=90, hjust=1)
+    ) + 
+  labs(x = "Wave", 
+       y = "", 
+       title = "Network Features") 
+```
+
+We see clear patterns here. Elephant networks tend to be the largest, the most dense, the most transitive, least modular and the ones that have the smallest average distance between the nodes. The dolphin networks, in turn, are the most sparse, the most modular, the ones where there is most distance between nodes, and the least dense. Finally, the baboon networks are the smallest but lie somewhere in the middle - in terms of structural features like density and average distance - between the elephant and the dolphin networks. Notice, however, that there are exceptions: component b of wave 3 of the baboon data is - in structural terms - quite close to the elephant networks. 
+
+This structural description is useful because it allows us to outline what the 'typical' network for each of these species looks like. The following figure shows three networks that exemplify these archetypes. Understanding these general properties will be useful as we move on to the analysis below. 
+
+```{r}
+graph <- as_tbl_graph(elph_w1_age) %>% 
+  mutate(species = "elephant", 
+         Popularity = centrality_degree(mode = 'in'))
+graph_bab <- as_tbl_graph(bab_w1_age) %>% 
+  mutate(species = "baboon", 
+         Popularity = centrality_degree(mode = 'in'))
+graph_dolph <- as_tbl_graph(dolphin_w3) %>% 
+  mutate(species = "dolphin", 
+         Popularity = centrality_degree(mode = 'in'))
+
+elph_graph <- ggraph(graph ) + 
+  geom_edge_link(alpha = 0.2) + 
+  geom_node_point(aes(size = Popularity),color = "steelblue", show.legend = F, 
+                  alpha = 0.8) + 
+  theme_graph()  + 
+  labs(title = "Elephant - Wave 1")
+
+bab_graph <-  ggraph(graph_bab) + 
+  geom_edge_link(alpha = 0.2) + 
+  geom_node_point(aes(size = Popularity),color = "steelblue", show.legend = F, 
+                  alpha = 0.8) + 
+  theme_graph()  + 
+  labs(title = "Baboon - Wave 1")
+
+
+dol_graph <-  ggraph(graph_dolph) + 
+  geom_edge_link(alpha = 0.2) + 
+  geom_node_point(aes(size = Popularity),color = "steelblue", show.legend = F, 
+                  alpha = 0.8) + 
+  theme_graph()  + 
+  labs(title = "Dolphin - Wave 3")
+
+elph_graph
+dol_graph
+bab_graph
+
+```
+
+## Resilience as efficiency
+
+One way to conceptualize a network's capacity to transmit culture is to examine how quickly it can spread information across its nodes. A measure that can capture that is Latora and Marchiore's idea of global efficiency. They define the efficiency in communication between to nodes i and j as inversely proportional to the distance between them. 
+
+$$ \text{Efficiency}_{ij} = \frac{1}{d_{ij}}$$
+
+The global efficiency of a network is the sum of all the inverse distances between each pair of nodes. It indicates then how quickly information can flow across all nodes in a structure. 
+
+Thus, we can tackle our question by examining how different types of removal affect the networks' global efficiency. We will remove nodes in a step-wise fashion, until we have removed 20% of the networks' agents. At each stage, we will calculate the global efficiency of the graph to examine how much it has changed after removals. Here, we will explore four different strategies: 
+
+1) Random removal 
+2) Age-based removal 
+3) Centrality-based removal 
+4) Degree-based removal 
+
+The following plot shows the trajectories of global efficiency after a certain percentage of nodes are removed. The vertical lines represent the range of values produced by random removal. Because the selection is random, we will get different resulting efficiencies depending on the sequence of removals. We conduct random removal 25 times at each step for each network. 
+
+```{r}
+rems_df <- read_rds("~/Documents/diffusion_animal_networks/shelf/different_removals_df.rds")
+
+rdl <- rems_df %>% 
+  rename(random = avg_eff) %>% 
+  pivot_longer(cols = c("centrality", 
+                        "degree", 
+                        "ages", 
+                        "random", 
+                        "targeted"), 
+               names_to = "removal_type", 
+               values_to = "efficiency") 
+rdl %>% 
+  filter(removal_type != "targeted") %>% 
+  ggplot(aes(x = removals, y = efficiency, color = removal_type)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "gray") + 
+  geom_line(alpha = 0.7) +
+  facet_wrap(~net) + 
+  labs(title = "Global efficiency after removals", 
+       x = "Percentage nodes removed", 
+       y = "Efficiency", 
+       color = "Removal")
+
+```
+
+There are a few patterns we need should highlight here. In general, the baboon and dolphin networks seem to be the most sensitive to removals. Component a of wave four of the baboon data and the last two dolphin structures seem particularly vulnerable. Notice that an exception is component b of wave 3 of the baboon data. Recall that this is a structure that resembles the elephant graphs. And just like the elephant structures, it remains practically unchanged across the removal strategies. The following plot inspects the trajectories of these latter networks more closely. We notice that the efficiency of the elephant graphs does decrease a bit but it is not considerable. Overall, we can argue that the graphs that more sparse, more modular, and have higher average distance between nodes - like the baboon and dolphin data - are more vulnerable to different types of removal. 
+
+```{r}
+rdl %>% 
+  filter(net %in% c('elephant_w1', "elephant_w2", "elephant_w3")) %>% 
+  filter(removal_type != "targeted") %>% 
+  ggplot(aes(x = removals, y = efficiency, color = removal_type)) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2, color = "gray") + 
+  geom_line(alpha = 0.7) +
+  facet_wrap(~net) + 
+  labs(title = "Global efficiency after removals", 
+       x = "Percentage nodes removed", 
+       y = "Efficiency")
+```
+
+We also notice patterns in terms of what strategies are the most harmful across the different species. In general, removing the most central nodes harms the structures' global efficiency the most. This is true for both the dolphin and the baboon data; wave 6 of the dolphin data being an exception. However, for the elephant networks, removing the nodes with the highest degree proves a better strategy. This is important because it shows that a species' characteristic network topology will impact which nodes, if removed, would have a higher impact in that structure's capacity to transmit information. While in highly modular structures, central individuals might be more important, in dense and highly transitive structures individuals with a lot of connections might play a bigger role. 
+
+## Beyond Efficiency: culture as problem solving
+
+The analysis above has important shortcomings. While it reveals interesting cross-species differences, the concept of efficiency is too abstract. In the context of cultural transmission, information does not flow perfectly and in parallel across a structure and, thus, just considering the distances between nodes is not entirely useful. For instance, we know animals use social learning strategies - like learning from the old - when picking up new cultural strategies. Such heuristics inevitably limit how information flows across a structure, in ways that global efficiency cannot capture. 
+
+Moreover, while a graph's ability to carry information to a majority of its members is important for understanding cultural transmission, this is not the end of the story. Cultural innovation and transmission is not only a matter of efficiency. This limitation is apparent in some results that have suggest that removing nodes makes graphs better at information transmission. From a graph-theoretic viewpoint, this makes sense: if you remove hard-to-reach nodes, the job of carrying information to the whole network is easier. The models we consider, then, should allow for this possibility. However, this statement is dissonant, and this dissonance is warranted. Members of a network are potential innovators and also repositories of cultural knowledge. Thus, their removal can affect the network in different ways, like its capacity to innovate or to retain useful information. 
+
+Lastly, some of the removal strategies we explored above bear little biological plausibility. Poachers do not target specimens based on their betweenness centrality, and disease is not more likely to afflict agents who have a higher out-degree. Therefore, we need to examine these structures' resiliency under a more realistic model - that takes into account that there is more to culture than just dissemination - and using removal strategies that are grounded in biological reality. 
+
+Here, we propose a complementary approach: conceiving of cultural resilience as a graph's capacity for problem solving. The idea of culture as problem-solving has a long history. We can understand culture as a set of socially transmitted patterns that allow agents to go about their everyday existences more efficiently. Thus, a graph's cultural resilience can be conceptualized in terms of its capacity to find optimal cultural strategies and to pass them across its nodes. Here, the task of dissemination no longer plays such a determining role. More nodes means that information might have to travel more but you also have more agents who can learn, innovate, and sustain culture.
+
+### The problem space as a rugged landscape
+
+The task that our graphs have now is to find optimal solutions in a space that represents a problem. An example of a problem is how to open a certain type of nut. The space of solutions can be: using a stone as a tool, using your fingers, or using your teeth. Each solution will have a given efficacy. It is this relationship between strategies and their efficacies that make up our problem space. 
+
+To represent this problem space, we can create a rugged landscape using an NK model. NK models provide a straightforward framework for building complex fitness landscapes. Here, $N$ can be thought of as blank spaces on a string that can be filled with either 1s or 0s. Therefore, there are $2^N$ possible permutations, which represent the space of positions that the agents can adopt. $K$, in turn, denotes the number of interdependencies between the components. A usual example is that of organizations, where the contribution of each department depends on its performance but also on its relationships to other departments.  In landscapes with no interdependencies - $(K = 0)$ -, the contribution of each component on the string (i.e. whether its value is 1 or 0) is independent and, therefore, there will be a single global optimum. At the other end of the spectrum, when $K = N - 1$, the contribution of each component depends on all other parts, leading to extremely rugged landscapes, dominated by a multiplicity of uncorrelated local optima. $N$, then, determines the amount of positions available and K dictates the ruggedness of the problem space. 
+
+The following plot represents the problem space we will use throughout the remainder of the paper. It is moderately complex landscape where $N = 12$ and $K=6$. In the figure, the vertices represent the positions in the landscape, and the edges represent adjacency - i.e. whether you can move from one position to the other changing only one character in the string. 
+
+```{r}
+landscape <- read_rds("~/Documents/diffusion_animal_networks/Data/trial_landscape.rds")
+d <- read_rds("~/Documents/diffusion_animal_networks/Data/rugged_graph.rds")
+
+wts <- landscape$fitness
+
+plot(d, 
+     vertex.size = wts*10, 
+     layout = layout_with_lgl, 
+     vertex.label = "", 
+     edge.width = 0.001)
+```
+
+This landscape has one global optimum of fitness one, and many uncorrelated local optima. It is very easy then for systems to get stuck in one of these points. We can build a model where we place our agents in this problem space and let them try to solve it - i.e. to climb to the highest point - using different learning strategies. We can then compare the performance of agents embedded in their observed structures with their performance after some nodes have been removed. 
+
+### The Model 
+
+At the start of the simulation the agents are placed in the rugged landscape and then they try to explore the environment. They learn from one another and directly from the environment. After each turn, we calculate the average fitness, which reflects how well the agents have explored the environment. 
+Two things make this simulation distinctive. First, agents are not placed randomly but rather initial fitness is positively correlated with age. This reflects that if you have lived longer, you have probably adopted more adaptive behaviors. Before each simulation, I draw a a random number of positions equal to the number of agents in our networks. It is worth noting that the number of positions is much greater than the number of agents. Then, I place the agents according to seniority, where the elders will be in better positions. Now, this does not mean that the oldest agents are in the best position available in the whole landscape. They occupy the best positions of the random sample that was drawn before the simulation. This is a double-edged sword: it can imply an initial advantage but it also might result in agents getting stuck in "local optima" - i.e. positions that are higher than their vicinity but not the highpoints of the whole landscape. Second, agents above a certain age threshold do not explore or learn, reflecting the fact that most species exhibit a formative period - usually early in ontogeny - where they are more likely to explore. Thus, older agents start in advantageous positions but they are "stuck" there for the remainder of the simulation. 
+
+After the initial positions have been drawn, each turn every agent follows the following procedure: 
+
+1) If the agent is above the age threshold, they stay put where they are. If they aren't, then they explore with a probability $\pi$. 
+2) If the agent explores then they move to an adjacent position. If that position has higher fitness than where they started the turn, then they move to the new position. If the new position is worse, then the agent stays where they were. 
+3) If the agent does not explore then they copy one of their elders. They copy the elder that is currently in the best position. If that position is better than the one they are currently occupying, then they move. 
+
+### Removal & Parameter Exploration
+
+To explore this model, we will vary two parameters. The first is removal strategy. Here, we are interested in the networks' capacity to explore the problem-space after some of its members have been removed. We will explore two removal strategies that have biological plausibility: age-based removal and random removal. The former reflects the plausibility of dying from old age or being hunted due to a marker of maturity (e.g. tusks). The latter presents a baseline against which to compare the networks resilience to removals. The second parameter is the probability of exploration $\pi$. At low values of $\pi$, we expect vertical removal to harm the networks quite a lot; agents are not learning much and the accumulated knowledge of elders is important. At high values, however, elders cease being a source of knowledge and become a burden, that lowers the average fitness of a population whose young are moving to greener pastures. We explore values of $\pi$ from 0 to 0.2 in increments of 0.02. For each condition, we run 100 simulations prior to removal and 100 simulations after removal.
+
+### Results 
+
+We will begin by examining the results after random removal. The following plot shows the average fitness at the end of the simulation, for each condition and each network. 
+
+```{r}
+ew1 <- readRDS("../../Results/ew1_rand.rds")
+ew2 <- readRDS("../../Results/ew2_rand.rds")
+ew3 <- readRDS("../../Results/ew3_rand.rds")
+dw1 <- readRDS("../../Results/dw1_rand.rds")
+dw2 <- readRDS("../../Results/dw2_rand.rds")
+dw3 <- readRDS("../../Results/dw3_rand.rds")
+dw4 <- readRDS("../../Results/dw4_rand.rds")
+dw5 <- readRDS("../../Results/dw5_rand.rds")
+dw6 <- readRDS("../../Results/dw6_rand.rds")
+bw1 <- read_rds("../../Results/bw1_rand.rds")
+bw2 <- read_rds("../../Results/bw2_rand.rds")
+bw3a <- read_rds("../../Results/bw3a_rand.rds")
+bw3b <- read_rds("../../Results/bw3b_rand.rds")
+bw4a <- read_rds("../../Results/bw4a_rand.rds")
+bw4b <- read_rds("../../Results/bw4b_rand.rds")
+
+
+ew1 <- ew1 %>% 
+  mutate(species = "elephant", 
+         wave = 1)
+
+ew2 <- ew2 %>% 
+  mutate(species = "elephant", 
+         wave = 2)
+
+ew3 <- ew3 %>% 
+  mutate(species = "elephant", 
+         wave = 3)
+
+dw1 <- dw1 %>% 
+  mutate(species = "dolphin", 
+         wave = 1)
+
+dw2 <- dw2 %>% 
+  mutate(species = "dolphin", 
+         wave = 2)
+
+dw3 <- dw3 %>% 
+  mutate(species = "dolphin", 
+         wave = 3)
+
+dw4 <- dw4 %>% 
+  mutate(species = "dolphin", 
+         wave = 4)
+
+dw5 <- dw5 %>% 
+  mutate(species = "dolphin", 
+         wave = 5)
+
+dw6 <- dw6 %>% 
+  mutate(species = "dolphin", 
+         wave = 6)
+
+bw1 <- bw1 %>% 
+  mutate(species = "baboon", 
+         wave = 1)
+
+bw2 <- bw2 %>% 
+  mutate(species = "baboon", 
+         wave = 2)
+
+bw3a <- bw3a %>% 
+  mutate(species = "baboon", 
+         wave = 3)
+
+bw3b <- bw3b %>% 
+  mutate(species = "baboon", 
+         wave = 4)
+
+bw4a <- bw4a %>% 
+  mutate(species = "baboon", 
+         wave = 5)
+
+bw4b <- bw4b %>% 
+  mutate(species = "baboon", 
+         wave = 6)
+
+all_data <- rbind(ew1, 
+                  ew2, 
+                  ew3, 
+                  dw1, 
+                  dw2, 
+                  dw3, 
+                  dw4,
+                  dw5, 
+                  dw6, 
+                  bw1, 
+                  bw2, 
+                  bw3a,
+                  bw3b,
+                  bw4a,
+                  bw4b)
+
+
+srs <- all_data %>% 
+  mutate(remove = case_when(remove == "nr" ~ "no removal", 
+                            remove == "r" ~ "removal")) %>% 
+  mutate(remove = as.factor(remove), 
+         p_exp = as.factor(p_exp), 
+         wave = as.factor(wave)) %>% 
+  filter(time == 100) %>% 
+  group_by(species, wave, remove, p_exp) %>% 
+  summarise(avg = median(med), 
+            avg_u = quantile(med, .75), 
+            avg_l = quantile(med, .25), 
+            avg_learn = median(learners_med, na.rm = T), 
+            avg_learn_u = quantile(learners_med, .75, na.rm = T), 
+            avg_learn_l = quantile(learners_med, 0.25, na.rm = T), 
+            avg_n_learn = median(nonlearners_med, na.rm = T), 
+            avg_n_learn_u = quantile(nonlearners_med, .75, na.rm = T), 
+            avg_n_learn_l = quantile(nonlearners_med, 0.25, na.rm = T))
+
+
+srs %>% 
+  ggplot(aes(x = p_exp, 
+             y = avg, 
+             col = remove)) +
+  geom_point(alpha = 0.3) + 
+  geom_pointrange(aes(x = p_exp, ymin = avg_l, ymax = avg_u), 
+                  alpha = 0.3) + 
+  facet_grid(species ~ wave) + 
+  labs(title = "Average fitness at the end of the run", 
+       subtitle = "Random Removal",
+       x = "Prob. of Exploration", 
+       y = "Average Fitness")
+```
+
+As our intuition suggested, when is exploration is low,  removal tends to harm the networks the most. As $\pi$ increases, however, the trade-off between tradition and exploration increases and we notice that some networks after removal reach even higher average fitness than their counterparts. In general, however, the differences are small, especially as $\pi$ increases. 
+
+It is worth noting that waves 1 and 2 of the elephant network display remarkably low and consistent fitness. This is because these two structures have age-structures that skew older and, therefore, most of the agents don't learn. As a result, the graph does not explore much of the space. This is an artifact of our assumptions but the key insight here is that there is not much difference in the average fitness before and after removal. 
+
+The results here are broadly consistent with out efficiency analyses. The elephant and baboon networks are rarely affected by random removal. One possible exception might be component a of the 4th wave of the baboon data; a structure that had proven vulnerable in our analysis above. The differences, however, are slight. The dolphin networks are quite affected by removal. Waves 2, 3, and 4 are particularly affected. Below, we will explain why this is the case. 
+
+Now, let's examine the results for vertical removal. Again, the following plot shows the average fitness for each condition before and after removal. 
+
+```{r}
+ew1 <- readRDS("../../Results/ew1.rds")
+ew2 <- readRDS("../../Results/ew2.rds")
+ew3 <- readRDS("../../Results/ew3.rds")
+dw1 <- readRDS("../../Results/dw1.rds")
+dw2 <- readRDS("../../Results/dw2.rds")
+dw3 <- readRDS("../../Results/dw3.rds")
+dw4 <- readRDS("../../Results/dw4.rds")
+dw5 <- readRDS("../../Results/dw5.rds")
+dw6 <- readRDS("../../Results/dw6.rds")
+bw1 <- read_rds("../../Results/bw1.rds")
+bw2 <- read_rds("../../Results/bw2.rds")
+bw3a <- read_rds("../../Results/bw3a.rds")
+bw3b <- read_rds("../../Results/bw3b.rds")
+bw4a <- read_rds("../../Results/bw4a.rds")
+bw4b <- read_rds("../../Results/bw4b.rds")
+
+
+ew1 <- ew1 %>% 
+  mutate(species = "elephant", 
+         wave = 1)
+
+ew2 <- ew2 %>% 
+  mutate(species = "elephant", 
+         wave = 2)
+
+ew3 <- ew3 %>% 
+  mutate(species = "elephant", 
+         wave = 3)
+
+dw1 <- dw1 %>% 
+  mutate(species = "dolphin", 
+         wave = 1)
+
+dw2 <- dw2 %>% 
+  mutate(species = "dolphin", 
+         wave = 2)
+
+dw3 <- dw3 %>% 
+  mutate(species = "dolphin", 
+         wave = 3)
+
+dw4 <- dw4 %>% 
+  mutate(species = "dolphin", 
+         wave = 4)
+
+dw5 <- dw5 %>% 
+  mutate(species = "dolphin", 
+         wave = 5)
+
+dw6 <- dw6 %>% 
+  mutate(species = "dolphin", 
+         wave = 6)
+
+bw1 <- bw1 %>% 
+  mutate(species = "baboon", 
+         wave = 1)
+
+bw2 <- bw2 %>% 
+  mutate(species = "baboon", 
+         wave = 2)
+
+bw3a <- bw3a %>% 
+  mutate(species = "baboon", 
+         wave = 3)
+
+bw3b <- bw3b %>% 
+  mutate(species = "baboon", 
+         wave = 4)
+
+bw4a <- bw4a %>% 
+  mutate(species = "baboon", 
+         wave = 5)
+
+bw4b <- bw4b %>% 
+  mutate(species = "baboon", 
+         wave = 6)
+
+all_data <- rbind(ew1, 
+                  ew2, 
+                  ew3, 
+                  dw1, 
+                  dw2, 
+                  dw3, 
+                  dw4,
+                  dw5, 
+                  dw6, 
+                  bw1, 
+                  bw2, 
+                  bw3a,
+                  bw3b,
+                  bw4a,
+                  bw4b)
+
+
+srs <- all_data %>% 
+  mutate(remove = case_when(remove == "nr" ~ "no removal", 
+                            remove == "r" ~ "removal")) %>% 
+  mutate(remove = as.factor(remove), 
+         p_exp = as.factor(p_exp), 
+         wave = as.factor(wave)) %>% 
+  filter(time == 100) %>% 
+  group_by(species, wave, remove, p_exp) %>% 
+  summarise(avg = median(med), 
+            avg_u = quantile(med, .75), 
+            avg_l = quantile(med, .25), 
+            avg_learn = median(learners_med, na.rm = T), 
+            avg_learn_u = quantile(learners_med, .75, na.rm = T), 
+            avg_learn_l = quantile(learners_med, 0.25, na.rm = T), 
+            avg_n_learn = median(nonlearners_med, na.rm = T), 
+            avg_n_learn_u = quantile(nonlearners_med, .75, na.rm = T), 
+            avg_n_learn_l = quantile(nonlearners_med, 0.25, na.rm = T))
+
+
+srs %>% 
+  ggplot(aes(x = p_exp, 
+             y = avg, 
+             col = remove)) +
+  geom_point(alpha = 0.5) + 
+  geom_pointrange(aes(x = p_exp, ymin = avg_l, ymax = avg_u), 
+                  alpha = 0.5) + 
+  facet_grid(species ~ wave) + 
+  labs(title = "Average fitness at the end of the run", 
+       x = "Prob. of Exploration", 
+       y = "Average Fitness")
+
+```
+
+Differences here remain consistent with random removal, though a bit attenuated. We notice, for instance, that now there is no difference for waves 5 and 6 of the dolphin data. Nonetheless, the waves that were vulnerable to random removal are also affected by vertical removal. This is interesting given how unaffected the structures were to age-based removal in our analytic approach. 
+
+At this point, it is important to examine why it is that waves 2, 3, and 4 of the dolphin data are so vulnerable to both random and age-based removal, under the assumptions of this model. Recall that this model gives a special role to older nodes: they represent repositories of knowledge and start in advantageous positions. Removing older agents, then, might get rid of that head start, especially if these nodes are central to the structure. Moreover, removing agents who are themselves connected to the elders might slow the dissemination of good information. 
+
+This vulnerability is partly explained by the structural position that old agents occupy. If older nodes enjoy particular positions of brokerage and centrality, then their removal can really hurt the network's capacity to explore the space. The following table shows the proportion of eigen-vector centrality of the 5% oldest agents in each of the dolphin networks. 
+
+```{r}
+egcents <- c()
+dolph_nets <- list(dolphin_w1, 
+                   dolphin_w2, 
+                   dolphin_w3, 
+                   dolphin_w4, 
+                   dolphin_w5, 
+                   dolphin_w6)
+
+for (i in 1:6) {
+oldies <- which(V(dolph_nets[[i]])$age >= quantile(V(dolph_nets[[i]])$age, 0.95) 
+                  )
+oldies_names <- names(V(dolph_nets[[i]])[oldies])
+cent_df <- tibble( 
+  node = names(V(dolph_nets[[i]])), 
+  ecent = eigen_centrality(dolph_nets[[i]])$vector) %>% 
+  mutate(old = if_else(node %in% oldies_names, 1, 0))
+cent <- cent_df %>% 
+  group_by(old) %>% 
+  summarise(sum(ecent)/sum(cent_df$ecent))
+
+egcents[i] <- cent[2,2][[1]]
+}
+
+ecent_df <- tibble(
+  network = c("dolphin_w1", 
+                  "dolphin_w2", 
+                  "dolphin_w3", 
+                  "dolphin_w4", 
+                  "dolphin_w5", 
+                  "dolphin_w6"), 
+  perc_ecent_olds = egcents
+)
+
+kableExtra::kable(ecent_df) %>% 
+  kableExtra::kable_styling("striped")
+```
+
+We notice that waves 2 and 3 have the highest proportion. This means that the oldest agents here tend to have high eigen-vector centrality and, therefore, that their removal might affect the graph's capacity to transmit the advantageous knowledge the elders already have. 
+
+However, this cannot be the whole story. Wave 4 is also affected by age-based removal but older nodes in this graph do not seem to enjoy strong positions of brokerage. The age-structure of this wave, however, is distinct: it has the lowest percentage of agents above the threshold at which specimens - under our model - cease to learn. At first, it is possible to think that this could be advantageous. After all, there are fewer free-riders in exploration. However, recall that older agents start with better placement. Moreover, agents only learn from those older than them. It might be then that vertical removal hurts wave 4 because it depletes the pool of valuable demonstrators. 
+
+We can examine this idea. For each network we can look at the number of possible demonstrator each agent of learning age has. We can then compare the number of demonstrators before and after removal. We expect the number to always decrease: after all, we are removing old agents who mostly serve as demonstrators. But  the relative magnitude can tell us something about the vulnerability of this network. 
+
+```{r}
+
+# Transform ages 
+V(dolphin_w1)$age <- V(dolphin_w1)$age/365
+V(dolphin_w2)$age <- V(dolphin_w2)$age/365
+V(dolphin_w3)$age <- V(dolphin_w3)$age/365
+V(dolphin_w4)$age <- V(dolphin_w4)$age/365
+V(dolphin_w5)$age <- V(dolphin_w5)$age/365
+V(dolphin_w6)$age <- V(dolphin_w6)$age/365
+
+
+get_demonstrator_difference <- function(net) {
+  
+demonstrators <- c()
+
+for (i in 1:length(V(net))) {
+node <- names(V(net)[[i]])
+neighbors <- neighborhood(net, 
+             nodes = node)
+  
+neighbors_ages <- V(net)[names(neighbors[[1]])]$age
+names(neighbors_ages) <- names(neighbors[[1]])
+
+if (neighbors_ages[node] >= 30) {
+  demonstrators[i] <- NA_real_
+} else {
+
+num_demos <- sum(neighbors_ages > neighbors_ages[node])
+
+demonstrators[i] <- num_demos
+}
+}
+
+
+nrems <- round(length(V(net))*0.1)
+
+d <- data.frame(
+  node = names(V(net)),
+  age = V(net)$age
+)
+
+ntbr <- d %>%
+  arrange(desc(age)) %>%
+  slice(1:nrems) %>%
+  pull(node)
+
+net_rems <- delete.vertices(net, ntbr)
+
+rem_demonstrators <- c()
+
+for (i in 1:length(V(net_rems))) {
+  
+  node <- names(V(net_rems)[[i]])
+neighbors <- neighborhood(net_rems, 
+             nodes = node)
+  
+neighbors_ages <- V(net)[names(neighbors[[1]])]$age
+names(neighbors_ages) <- names(neighbors[[1]])
+  
+  if (neighbors_ages[node] >= 30) {
+    rem_demonstrators[i] <- NA_real_
+  } else {
+  
+  num_demos <- sum(neighbors_ages > neighbors_ages[node])
+  
+  rem_demonstrators[i] <- num_demos
+  }
+}
+
+
+
+return(diff = sum(demonstrators, na.rm = T) - sum(rem_demonstrators, na.rm = T))
+
+}
+
+list_nets <- list(dolphin_w1, dolphin_w2, dolphin_w3, dolphin_w4, dolphin_w5, dolphin_w6)
+diffs_vector <- map_dbl(list_nets, 
+                        get_demonstrator_difference)
+
+
+diffs_df <- tibble(
+  waves = c("wave_1", "wave_2", "wave_3", "wave_4", "wave_5", "wave_6"), 
+  difference_demonstrators = diffs_vector
+)
+
+
+diffs_df %>% 
+  kableExtra::kable(format = "html", caption = "Loss of Demonstrators") %>% 
+  kableExtra::kable_styling("striped")
+```
+
+We notice that wave 4, alongside with waves 2 and 3, is highly affected by the removal of older agents. This is reassuring, given that these are the waves that are most affected in our results. Thus, although in wave 4 older agents do not hold central structural positions, their removal considerably depletes the pool of demonstrators from whom agents can learn. 
+
+## Conclusion 
+
+Our analyses show that networks are broadly resilient to removal but that, when we make biologically plausible assumptions, we gain insights about what structural features might make the graphs vulnerable to losing some of their nodes. Our analytic approach suggests that networks are quite resilient to random and age-based removal. It is only when we use targeted strategies, like removing the most central nodes, when the efficiency of the graphs declines substantially. However, those strategies lack biological grounding. To address some of the shortcomings of the analytic approach, we build a model where agents explore a rugged landscape, learning from their elders, who themselves start in advantageous positions. This model captures aspects of culture beyond only the dissemination of information. The fact that older specimens start in better positions and that agents learn through vertical trasmission adds biological plausibility to this model. The results of this model are broadly consistent with our analytic approach. The most vulnerable networks tend to be the dolphin structures, which are the least dense and most modular of the three. This vulnerability shows up with random removal, without the need to resort to implausible removal mechanisms. We also notice that some of the dolphin networks remain vulnerable to age-based removal. This vulnerability can not only be explained by the abovementioned structural features, but also by the positions that older agents enjoy in these structures. For waves 2 and 3, older nodes have central positions which makes it so that their removal harms the graphs' capacity to explore the problem-space. For wave 4, older agents represent a smaller percentage of the population, and thus their removal results in the pool of demonstrators being depleted. In sum, the structural properties of the species' networks is related to how vulnerable they might be to different types of removal. When we add plausible assumptions about learning mechanisms, we need to look beyond the general features of the graphs and examine the structural positions that the agents involved in these learning mechanisms might have. 
+
